@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
@@ -15,11 +16,17 @@ import (
 	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
 )
 
-func TestCreateNotification(t *testing.T) {
+func newTestServer(t *testing.T) (*http.ServeMux, *pgxpool.Pool) {
+	t.Helper()
 	pool := testdb.New(t)
-	queries := store.New(pool)
 	mux := http.NewServeMux()
-	api.Register(mux, queries, slog.New(slog.DiscardHandler))
+	api.Register(mux, store.New(pool), slog.New(slog.DiscardHandler))
+	return mux, pool
+}
+
+func TestCreateNotification(t *testing.T) {
+	mux, pool := newTestServer(t)
+	queries := store.New(pool)
 
 	post := func(t *testing.T, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -151,6 +158,93 @@ func TestCreateNotification(t *testing.T) {
 		if got.Message != "internal error" {
 			t.Errorf("message = %q, want %q", got.Message, "internal error")
 		}
+	})
+}
+
+func TestGetNotification(t *testing.T) {
+	mux, pool := newTestServer(t)
+	queries := store.New(pool)
+
+	get := func(t *testing.T, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/notifications/"+id, nil)
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	wantError := func(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantMessage string) {
+		t.Helper()
+		if rec.Code != wantStatus {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, wantStatus, rec.Body)
+		}
+		var got api.Error
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if got.Message != wantMessage {
+			t.Errorf("message = %q, want %q", got.Message, wantMessage)
+		}
+	}
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		t.Fatalf("generate id: %v", err)
+	}
+	row, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{
+		ID:        id,
+		Recipient: "user@example.com",
+		Channel:   "email",
+		Content:   "hello",
+		Priority:  0,
+	})
+	if err != nil {
+		t.Fatalf("insert notification: %v", err)
+	}
+
+	t.Run("found", func(t *testing.T) {
+		rec := get(t, id.String())
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body)
+		}
+		var got api.Notification
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !got.CreatedAt.Equal(row.CreatedAt) {
+			t.Errorf("created_at = %s, want %s", got.CreatedAt, row.CreatedAt)
+		}
+		want := api.Notification{
+			Id:        id,
+			Recipient: "user@example.com",
+			Channel:   api.Email,
+			Content:   "hello",
+			Priority:  api.High,
+			Status:    api.Pending,
+			CreatedAt: got.CreatedAt,
+		}
+		if got != want {
+			t.Errorf("response = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("unknown id", func(t *testing.T) {
+		unknown, err := uuid.NewV7()
+		if err != nil {
+			t.Fatalf("generate id: %v", err)
+		}
+
+		wantError(t, get(t, unknown.String()), http.StatusNotFound, "notification not found")
+	})
+
+	t.Run("malformed id", func(t *testing.T) {
+		wantError(t, get(t, "not-a-uuid"), http.StatusBadRequest, `parameter "id" is not valid`)
+	})
+
+	t.Run("database failure", func(t *testing.T) {
+		pool.Close()
+
+		wantError(t, get(t, id.String()), http.StatusInternalServerError, "internal error")
 	})
 }
 
