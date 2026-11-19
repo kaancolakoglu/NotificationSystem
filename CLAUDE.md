@@ -68,7 +68,10 @@ These are settled. Raise it before changing one.
   matches it and CI reads it. Module path:
   `github.com/kaancolakoglu/NotificationSystem`.
 - HTTP: `net/http` with oapi-codegen, spec-first, strict server, standard
-  library router. Spec at `api/openapi.yaml`.
+  library router. Spec at `api/openapi.yaml`. The spec covers `/v1` only.
+  `/healthz`, `/readyz`, `/metrics` and `/openapi.yaml` are plain routes on
+  the API's mux: the first three serve operators, the last is the spec
+  itself.
 - Postgres through `pgx/v5` and `pgxpool`. Queries with sqlc in pgx/v5 mode.
 - Migrations: goose SQL files in `migrations/`, applied by `cmd/migrate`
   using goose as a library with embedded files.
@@ -92,8 +95,13 @@ These are settled. Raise it before changing one.
 - Validation runs at the API, in `internal/validate`, as a map from channel
   to function. Limits are named constants:
   - sms: recipient in E.164; content 1 to 1600 characters.
-  - email: recipient parses with `net/mail`; content at most 100 kB.
-  - push: recipient token not empty; content at most 4096 bytes.
+  - email: recipient parses with `net/mail` and is the bare address, with no
+    display name; content 1 byte to 100 kB.
+  - push: recipient token not empty; content 1 to 4096 bytes.
+  - every channel: no NUL character in recipient or content. Reason:
+    Postgres text cannot store one.
+- A create request body over 1 MB is 413. Reason: the largest valid body is
+  100 kB of email content, which JSON escaping can grow to 600 kB.
 - Batch is partial success. Validate each item, insert all valid items in one
   transaction, answer per index. 202 if at least one is accepted, 422 if none.
   More than 1000 items is 422.

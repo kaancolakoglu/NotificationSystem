@@ -29,6 +29,8 @@ services:
   api:
     build: .
     command: ["api"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
     depends_on:
       migrate:
         condition: service_completed_successfully

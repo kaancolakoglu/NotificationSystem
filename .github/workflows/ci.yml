@@ -19,5 +19,10 @@ jobs:
           for dir in . tools/*; do
             go -C "$dir" mod tidy -diff
           done
+      - name: Check generated code is up to date
+        run: |
+          make generate
+          git add --all
+          git diff --cached --exit-code
       - run: make lint
       - run: make test
