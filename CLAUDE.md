@@ -109,7 +109,11 @@ These are settled. Raise it before changing one.
   Table `idempotency_keys (key primary key, request_hash, response,
   created_at)`. Insert the key in the same transaction as the notifications
   with `ON CONFLICT DO NOTHING`. On conflict return the stored response. The
-  same key with a different request hash is 409.
+  same key with a different request hash is 409. The hash is SHA-256 of the
+  body after defaults are applied, so field order and a spelled-out default
+  do not matter. A key is 1 to 255 bytes, else 400. Only an accepted request
+  stores its key: a rejected one can be corrected and sent again with the
+  same key.
 - Pagination is keyset on `id` descending with an opaque cursor.
 - Cancel works only from `pending`: 200 on success, 409 otherwise, 404 if
   unknown.

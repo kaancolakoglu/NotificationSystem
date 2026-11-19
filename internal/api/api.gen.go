@@ -119,6 +119,12 @@ type Priority string
 // Status defines model for Status.
 type Status string
 
+// CreateNotificationParams defines parameters for CreateNotification.
+type CreateNotificationParams struct {
+	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
 // CreateNotificationJSONRequestBody defines body for CreateNotification for application/json ContentType.
 type CreateNotificationJSONRequestBody = CreateNotificationRequest
 
@@ -126,7 +132,7 @@ type CreateNotificationJSONRequestBody = CreateNotificationRequest
 type ServerInterface interface {
 	// CreateNotification Create a notification
 	// (POST /v1/notifications)
-	CreateNotification(w http.ResponseWriter, r *http.Request)
+	CreateNotification(w http.ResponseWriter, r *http.Request, params CreateNotificationParams)
 	// GetNotification Get a notification by id
 	// (GET /v1/notifications/{id})
 	GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
@@ -144,8 +150,35 @@ type MiddlewareFunc func(http.Handler) http.Handler
 // CreateNotification operation middleware
 func (siw *ServerInterfaceWrapper) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CreateNotificationParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.CreateNotification(w, r)
+		siw.Handler.CreateNotification(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -308,7 +341,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 }
 
 type CreateNotificationRequestObject struct {
-	Body *CreateNotificationJSONRequestBody
+	Params CreateNotificationParams
+	Body   *CreateNotificationJSONRequestBody
 }
 
 type CreateNotificationResponseObject interface {
@@ -339,6 +373,20 @@ func (response CreateNotification400JSONResponse) VisitCreateNotificationRespons
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateNotification409JSONResponse Error
+
+func (response CreateNotification409JSONResponse) VisitCreateNotificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -499,8 +547,10 @@ type strictHandler struct {
 }
 
 // CreateNotification operation middleware
-func (sh *strictHandler) CreateNotification(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) CreateNotification(w http.ResponseWriter, r *http.Request, params CreateNotificationParams) {
 	var request CreateNotificationRequestObject
+
+	request.Params = params
 
 	var body CreateNotificationJSONRequestBody
 	if err := runtime.BindJSONBody(r, &body); err != nil {

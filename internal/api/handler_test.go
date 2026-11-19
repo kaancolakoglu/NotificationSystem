@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -20,7 +21,7 @@ func newTestServer(t *testing.T) (*http.ServeMux, *pgxpool.Pool) {
 	t.Helper()
 	pool := testdb.New(t)
 	mux := http.NewServeMux()
-	api.Register(mux, store.New(pool), slog.New(slog.DiscardHandler))
+	api.Register(mux, pool, slog.New(slog.DiscardHandler))
 	return mux, pool
 }
 
@@ -30,11 +31,7 @@ func TestCreateNotification(t *testing.T) {
 
 	post := func(t *testing.T, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		mux.ServeHTTP(rec, req)
-		return rec
+		return postNotification(t, mux, body)
 	}
 
 	accepted := []struct {
@@ -159,6 +156,149 @@ func TestCreateNotification(t *testing.T) {
 			t.Errorf("message = %q, want %q", got.Message, "internal error")
 		}
 	})
+}
+
+func TestCreateNotificationWithIdempotencyKey(t *testing.T) {
+	mux, pool := newTestServer(t)
+	const body = `{"recipient":"+905551234567","channel":"sms","content":"hello"}`
+
+	wantAccepted := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusAccepted, rec.Body)
+		}
+	}
+	wantRejected := func(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantMessage string) {
+		t.Helper()
+		if rec.Code != wantStatus {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, wantStatus, rec.Body)
+		}
+		var got api.Error
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if got.Message != wantMessage {
+			t.Errorf("message = %q, want %q", got.Message, wantMessage)
+		}
+	}
+	wantInserted := func(t *testing.T, before, want int) {
+		t.Helper()
+		if got := countNotifications(t, pool) - before; got != want {
+			t.Errorf("inserted %d rows, want %d", got, want)
+		}
+	}
+
+	t.Run("replay returns the first response and creates one row", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		first := postNotification(t, mux, body, "replay")
+		second := postNotification(t, mux, body, "replay")
+
+		wantAccepted(t, first)
+		wantAccepted(t, second)
+		if first.Body.String() != second.Body.String() {
+			t.Errorf("replay = %s, want %s", second.Body, first.Body)
+		}
+		wantInserted(t, before, 1)
+	})
+
+	t.Run("default priority spelled out is the same request", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		first := postNotification(t, mux, body, "spelled-out")
+		second := postNotification(t, mux, `{"priority":"normal","content":"hello","channel":"sms","recipient":"+905551234567"}`, "spelled-out")
+
+		wantAccepted(t, first)
+		wantAccepted(t, second)
+		if first.Body.String() != second.Body.String() {
+			t.Errorf("replay = %s, want %s", second.Body, first.Body)
+		}
+		wantInserted(t, before, 1)
+	})
+
+	t.Run("simultaneous requests create one notification", func(t *testing.T) {
+		before := countNotifications(t, pool)
+		responses := make([]*httptest.ResponseRecorder, 20)
+
+		var wg sync.WaitGroup
+		for i := range responses {
+			wg.Go(func() {
+				responses[i] = postNotification(t, mux, body, "simultaneous")
+			})
+		}
+		wg.Wait()
+
+		for _, rec := range responses {
+			wantAccepted(t, rec)
+			if rec.Body.String() != responses[0].Body.String() {
+				t.Errorf("response = %s, want %s", rec.Body, responses[0].Body)
+			}
+		}
+		wantInserted(t, before, 1)
+	})
+
+	t.Run("different body is 409", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		first := postNotification(t, mux, body, "different-body")
+		second := postNotification(t, mux, `{"recipient":"+905551234567","channel":"sms","content":"goodbye"}`, "different-body")
+
+		wantAccepted(t, first)
+		wantRejected(t, second, http.StatusConflict, "Idempotency-Key was already used with a different request body")
+		wantInserted(t, before, 1)
+	})
+
+	t.Run("different keys create two notifications", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		wantAccepted(t, postNotification(t, mux, body, "key-one"))
+		wantAccepted(t, postNotification(t, mux, body, "key-two"))
+
+		wantInserted(t, before, 2)
+	})
+
+	t.Run("invalid request does not use up the key", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		invalid := postNotification(t, mux, `{"recipient":"0555","channel":"sms","content":"hello"}`, "invalid-first")
+		valid := postNotification(t, mux, body, "invalid-first")
+
+		if invalid.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want %d, body %s", invalid.Code, http.StatusUnprocessableEntity, invalid.Body)
+		}
+		wantAccepted(t, valid)
+		wantInserted(t, before, 1)
+	})
+
+	t.Run("key length", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		wantAccepted(t, postNotification(t, mux, body, strings.Repeat("k", 255)))
+		wantRejected(t, postNotification(t, mux, body, strings.Repeat("k", 256)), http.StatusBadRequest, "Idempotency-Key must be 1 to 255 bytes long")
+		wantRejected(t, postNotification(t, mux, body, ""), http.StatusBadRequest, "Idempotency-Key must be 1 to 255 bytes long")
+		wantInserted(t, before, 1)
+	})
+
+	t.Run("key sent twice is 400", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		rec := postNotification(t, mux, body, "one", "two")
+
+		wantRejected(t, rec, http.StatusBadRequest, `parameter "Idempotency-Key" must be sent once`)
+		wantInserted(t, before, 0)
+	})
+}
+
+func postNotification(t *testing.T, mux *http.ServeMux, body string, idempotencyKeys ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for _, key := range idempotencyKeys {
+		req.Header.Add("Idempotency-Key", key)
+	}
+	mux.ServeHTTP(rec, req)
+	return rec
 }
 
 func TestGetNotification(t *testing.T) {

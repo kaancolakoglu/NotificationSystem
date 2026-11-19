@@ -11,6 +11,23 @@ import (
 	"github.com/google/uuid"
 )
 
+const getIdempotencyKey = `-- name: GetIdempotencyKey :one
+SELECT request_hash, response FROM idempotency_keys
+WHERE key = $1
+`
+
+type GetIdempotencyKeyRow struct {
+	RequestHash []byte
+	Response    []byte
+}
+
+func (q *Queries) GetIdempotencyKey(ctx context.Context, key string) (GetIdempotencyKeyRow, error) {
+	row := q.db.QueryRow(ctx, getIdempotencyKey, key)
+	var i GetIdempotencyKeyRow
+	err := row.Scan(&i.RequestHash, &i.Response)
+	return i, err
+}
+
 const getNotification = `-- name: GetNotification :one
 SELECT id, recipient, channel, content, priority, status, created_at FROM notifications
 WHERE id = $1
@@ -29,6 +46,26 @@ func (q *Queries) GetNotification(ctx context.Context, id uuid.UUID) (Notificati
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const insertIdempotencyKey = `-- name: InsertIdempotencyKey :execrows
+INSERT INTO idempotency_keys (key, request_hash, response)
+VALUES ($1, $2, $3)
+ON CONFLICT (key) DO NOTHING
+`
+
+type InsertIdempotencyKeyParams struct {
+	Key         string
+	RequestHash []byte
+	Response    []byte
+}
+
+func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertIdempotencyKey, arg.Key, arg.RequestHash, arg.Response)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertNotification = `-- name: InsertNotification :one

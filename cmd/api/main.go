@@ -13,7 +13,6 @@ import (
 
 	spec "github.com/kaancolakoglu/NotificationSystem/api"
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
-	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 )
 
 const (
@@ -47,13 +46,13 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL string) error {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           newHandler(store.New(pool), logger),
+		Handler:           newHandler(pool, logger),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	return server.ListenAndServe()
 }
 
-func newHandler(queries *store.Queries, logger *slog.Logger) http.Handler {
+func newHandler(pool *pgxpool.Pool, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -64,6 +63,6 @@ func newHandler(queries *store.Queries, logger *slog.Logger) http.Handler {
 			logger.ErrorContext(r.Context(), "write openapi spec", "error", err)
 		}
 	})
-	api.Register(mux, queries, logger)
+	api.Register(mux, pool, logger)
 	return http.MaxBytesHandler(mux, maxBodyBytes)
 }

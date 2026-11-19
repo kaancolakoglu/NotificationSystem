@@ -10,6 +10,13 @@ import (
 	"github.com/google/uuid"
 )
 
+type IdempotencyKey struct {
+	Key         string
+	RequestHash []byte
+	Response    []byte
+	CreatedAt   time.Time
+}
+
 type Notification struct {
 	ID        uuid.UUID
 	Recipient string
