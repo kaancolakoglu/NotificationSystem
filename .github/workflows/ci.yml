@@ -15,6 +15,9 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
       - name: Check every go.mod is tidy
-        run: find . -name go.mod -exec dirname {} \; | xargs -I{} go -C {} mod tidy -diff
+        run: |
+          for dir in . tools/*; do
+            go -C "$dir" mod tidy -diff
+          done
       - run: make lint
       - run: make test
