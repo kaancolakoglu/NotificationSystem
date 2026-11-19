@@ -17,8 +17,21 @@ services:
       timeout: 2s
       retries: 10
 
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build: .
+    command: ["api"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8080:8080"
     healthcheck:

@@ -1,10 +1,11 @@
 FROM golang:1.27.4-alpine3.24 AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd/ cmd/
-RUN CGO_ENABLED=0 go build -o /out/api ./cmd/api
+COPY migrations/ migrations/
+RUN CGO_ENABLED=0 go build -o /out/ ./cmd/...
 
 FROM alpine:3.24.4
-COPY --from=build /out/api /usr/local/bin/api
+COPY --from=build /out/ /usr/local/bin/
 USER nobody
-ENTRYPOINT ["/usr/local/bin/api"]

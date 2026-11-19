@@ -85,6 +85,9 @@ These are settled. Raise it before changing one.
   uses the words; default is normal.
 - Status is text with a CHECK: `pending`, `processing`, `sent`, `failed`,
   `cancelled`.
+- Channel and priority have a CHECK too: `sms`, `email`, `push`, and 0, 1,
+  2. Reason: workers claim by channel and priority, so a row with any other
+  value would stay `pending` forever without an error.
 - Scheduling and retry delay share one column, `next_attempt_at`.
 - Validation runs at the API, in `internal/validate`, as a map from channel
   to function. Limits are named constants:
