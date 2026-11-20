@@ -53,3 +53,36 @@ func TestBodyOverLimitIsRejected(t *testing.T) {
 		t.Errorf("body = %s, want it to mention the size limit", rec.Body)
 	}
 }
+
+func TestBatchBodyLimit(t *testing.T) {
+	post := func(t *testing.T, contentBytes int) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"notifications":[{"recipient":"user@example.com","channel":"email","content":"` + strings.Repeat("a", contentBytes) + `"}]}`
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications/batch", strings.NewReader(body))
+		newHandler(nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("body over the single limit is read", func(t *testing.T) {
+		rec := post(t, maxBodyBytes)
+
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusUnprocessableEntity, rec.Body)
+		}
+		if !strings.Contains(rec.Body.String(), "no notification in the batch is valid") {
+			t.Errorf("body = %s, want the batch to be rejected by validation", rec.Body)
+		}
+	})
+
+	t.Run("body over the batch limit is 413", func(t *testing.T) {
+		rec := post(t, maxBatchBodyBytes)
+
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+		}
+		if !strings.Contains(rec.Body.String(), "request body must be at most 10485760 bytes") {
+			t.Errorf("body = %s, want it to mention the size limit", rec.Body)
+		}
+	})
+}

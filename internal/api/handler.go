@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
@@ -30,9 +31,19 @@ var priorityWords = map[int16]Priority{
 	2: Low,
 }
 
-const maxIdempotencyKeyBytes = 255
+const (
+	maxIdempotencyKeyBytes = 255
+	maxBatchSize           = 1000
 
-var errIdempotencyKeyUsed = errors.New("idempotency key already used")
+	idempotencyKeyConflictMessage = "Idempotency-Key was already used with a different request body"
+)
+
+var idempotencyKeyLengthMessage = fmt.Sprintf("Idempotency-Key must be 1 to %d bytes long", maxIdempotencyKeyBytes)
+
+var (
+	errIdempotencyKeyUsed     = errors.New("idempotency key already used")
+	errIdempotencyKeyConflict = errors.New("idempotency key already used with a different request")
+)
 
 type server struct {
 	pool    *pgxpool.Pool
@@ -58,110 +69,103 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
 }
 
 func (s *server) CreateNotification(ctx context.Context, request CreateNotificationRequestObject) (CreateNotificationResponseObject, error) {
-	body := request.Body
+	body := *request.Body
+	priority := priorityOf(body)
+	body.Priority = &priority
 
-	priority := Normal
-	if body.Priority != nil {
-		priority = *body.Priority
-	}
-	priorityValue, ok := priorities[priority]
-	if !ok {
-		return CreateNotification422JSONResponse{Message: "priority must be one of high, normal, low"}, nil
-	}
-	if err := validate.Notification(string(body.Channel), body.Recipient, body.Content); err != nil {
+	priorityValue, err := validateRequest(body, priority)
+	if err != nil {
 		return CreateNotification422JSONResponse{Message: err.Error()}, nil
 	}
-
 	key := request.Params.IdempotencyKey
-	if key != nil && (*key == "" || len(*key) > maxIdempotencyKeyBytes) {
-		return CreateNotification400JSONResponse{Message: fmt.Sprintf("Idempotency-Key must be 1 to %d bytes long", maxIdempotencyKeyBytes)}, nil
+	if !validIdempotencyKey(key) {
+		return CreateNotification400JSONResponse{Message: idempotencyKeyLengthMessage}, nil
 	}
 
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("generate id: %w", err)
 	}
-	insert := store.InsertNotificationParams{
-		ID:        id,
-		Recipient: body.Recipient,
-		Channel:   string(body.Channel),
-		Content:   body.Content,
-		Priority:  priorityValue,
-	}
-
-	if key == nil {
-		row, err := s.queries.InsertNotification(ctx, insert)
-		if err != nil {
-			return nil, fmt.Errorf("insert notification: %w", err)
-		}
-		notification, err := toNotification(row)
-		if err != nil {
-			return nil, err
-		}
-		return CreateNotification202JSONResponse(notification), nil
-	}
-
-	encoded, err := json.Marshal(CreateNotificationRequest{
-		Recipient: body.Recipient,
-		Channel:   body.Channel,
-		Content:   body.Content,
-		Priority:  &priority,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("encode request for hashing: %w", err)
-	}
-	requestHash := sha256.Sum256(encoded)
-	return s.createWithKey(ctx, *key, requestHash[:], insert)
-}
-
-func (s *server) createWithKey(ctx context.Context, key string, requestHash []byte, insert store.InsertNotificationParams) (CreateNotificationResponseObject, error) {
-	var notification Notification
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		queries := s.queries.WithTx(tx)
-		row, err := queries.InsertNotification(ctx, insert)
-		if err != nil {
-			return fmt.Errorf("insert notification: %w", err)
-		}
-		notification, err = toNotification(row)
-		if err != nil {
-			return err
-		}
-		response, err := json.Marshal(notification)
-		if err != nil {
-			return fmt.Errorf("encode response: %w", err)
-		}
-		inserted, err := queries.InsertIdempotencyKey(ctx, store.InsertIdempotencyKeyParams{
-			Key:         key,
-			RequestHash: requestHash,
-			Response:    response,
+	notification, err := createOnce(ctx, s, key, body, func(queries *store.Queries) (Notification, error) {
+		row, err := queries.InsertNotification(ctx, store.InsertNotificationParams{
+			ID:        id,
+			Recipient: body.Recipient,
+			Channel:   string(body.Channel),
+			Content:   body.Content,
+			Priority:  priorityValue,
 		})
 		if err != nil {
-			return fmt.Errorf("insert idempotency key: %w", err)
+			return Notification{}, fmt.Errorf("insert notification: %w", err)
 		}
-		if inserted == 0 {
-			return errIdempotencyKeyUsed
-		}
-		return nil
+		return toNotification(row)
 	})
-	if err == nil {
-		return CreateNotification202JSONResponse(notification), nil
+	if errors.Is(err, errIdempotencyKeyConflict) {
+		return CreateNotification409JSONResponse{Message: idempotencyKeyConflictMessage}, nil
 	}
-	if !errors.Is(err, errIdempotencyKeyUsed) {
-		return nil, fmt.Errorf("create with idempotency key: %w", err)
+	if err != nil {
+		return nil, err
+	}
+	return CreateNotification202JSONResponse(notification), nil
+}
+
+func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObject) (CreateBatchResponseObject, error) {
+	body := *request.Body
+	if len(body.Notifications) == 0 || len(body.Notifications) > maxBatchSize {
+		return CreateBatch422JSONResponse{Message: fmt.Sprintf("a batch must hold 1 to %d notifications", maxBatchSize)}, nil
 	}
 
-	stored, err := s.queries.GetIdempotencyKey(ctx, key)
+	batchID, err := uuid.NewV7()
 	if err != nil {
-		return nil, fmt.Errorf("get idempotency key: %w", err)
+		return nil, fmt.Errorf("generate batch id: %w", err)
 	}
-	if !bytes.Equal(stored.RequestHash, requestHash) {
-		return CreateNotification409JSONResponse{Message: "Idempotency-Key was already used with a different request body"}, nil
+	results := make([]BatchItemResult, len(body.Notifications))
+	inserts := make([]store.InsertBatchNotificationsParams, 0, len(body.Notifications))
+	for i, item := range body.Notifications {
+		priority := priorityOf(item)
+		body.Notifications[i].Priority = &priority
+		results[i].Index = i
+
+		priorityValue, err := validateRequest(item, priority)
+		if err != nil {
+			message := err.Error()
+			results[i].Error = &message
+			continue
+		}
+		id, err := uuid.NewV7()
+		if err != nil {
+			return nil, fmt.Errorf("generate id: %w", err)
+		}
+		results[i].Id = &id
+		inserts = append(inserts, store.InsertBatchNotificationsParams{
+			ID:        id,
+			Recipient: item.Recipient,
+			Channel:   string(item.Channel),
+			Content:   item.Content,
+			Priority:  priorityValue,
+			BatchID:   pgtype.UUID{Bytes: batchID, Valid: true},
+		})
 	}
-	var first Notification
-	if err := json.Unmarshal(stored.Response, &first); err != nil {
-		return nil, fmt.Errorf("decode stored response: %w", err)
+	if len(inserts) == 0 {
+		return CreateBatch422JSONResponse{Message: "no notification in the batch is valid", Results: &results}, nil
 	}
-	return CreateNotification202JSONResponse(first), nil
+	key := request.Params.IdempotencyKey
+	if !validIdempotencyKey(key) {
+		return CreateBatch400JSONResponse{Message: idempotencyKeyLengthMessage}, nil
+	}
+
+	created, err := createOnce(ctx, s, key, body, func(queries *store.Queries) (BatchCreated, error) {
+		if _, err := queries.InsertBatchNotifications(ctx, inserts); err != nil {
+			return BatchCreated{}, fmt.Errorf("insert batch notifications: %w", err)
+		}
+		return BatchCreated{BatchId: batchID, Results: results}, nil
+	})
+	if errors.Is(err, errIdempotencyKeyConflict) {
+		return CreateBatch409JSONResponse{Message: idempotencyKeyConflictMessage}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return CreateBatch202JSONResponse(created), nil
 }
 
 func (s *server) GetNotification(ctx context.Context, request GetNotificationRequestObject) (GetNotificationResponseObject, error) {
@@ -178,6 +182,105 @@ func (s *server) GetNotification(ctx context.Context, request GetNotificationReq
 		return nil, err
 	}
 	return GetNotification200JSONResponse(notification), nil
+}
+
+func (s *server) GetBatch(ctx context.Context, request GetBatchRequestObject) (GetBatchResponseObject, error) {
+	counts, err := s.queries.CountBatchByStatus(ctx, pgtype.UUID{Bytes: request.Id, Valid: true})
+	if err != nil {
+		return nil, fmt.Errorf("count batch by status: %w", err)
+	}
+	if counts.Total == 0 {
+		return GetBatch404JSONResponse{Message: "batch not found"}, nil
+	}
+	return GetBatch200JSONResponse{
+		Id:         request.Id,
+		Total:      counts.Total,
+		Pending:    counts.Pending,
+		Processing: counts.Processing,
+		Sent:       counts.Sent,
+		Failed:     counts.Failed,
+		Cancelled:  counts.Cancelled,
+	}, nil
+}
+
+func createOnce[T any](ctx context.Context, s *server, key *string, request any, create func(*store.Queries) (T, error)) (T, error) {
+	var zero T
+	if key == nil {
+		return create(s.queries)
+	}
+
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return zero, fmt.Errorf("encode request for hashing: %w", err)
+	}
+	requestHash := sha256.Sum256(encoded)
+
+	var created T
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		queries := s.queries.WithTx(tx)
+		var err error
+		created, err = create(queries)
+		if err != nil {
+			return err
+		}
+		response, err := json.Marshal(created)
+		if err != nil {
+			return fmt.Errorf("encode response: %w", err)
+		}
+		inserted, err := queries.InsertIdempotencyKey(ctx, store.InsertIdempotencyKeyParams{
+			Key:         *key,
+			RequestHash: requestHash[:],
+			Response:    response,
+		})
+		if err != nil {
+			return fmt.Errorf("insert idempotency key: %w", err)
+		}
+		if inserted == 0 {
+			return errIdempotencyKeyUsed
+		}
+		return nil
+	})
+	if err == nil {
+		return created, nil
+	}
+	if !errors.Is(err, errIdempotencyKeyUsed) {
+		return zero, fmt.Errorf("create with idempotency key: %w", err)
+	}
+
+	stored, err := s.queries.GetIdempotencyKey(ctx, *key)
+	if err != nil {
+		return zero, fmt.Errorf("get idempotency key: %w", err)
+	}
+	if !bytes.Equal(stored.RequestHash, requestHash[:]) {
+		return zero, errIdempotencyKeyConflict
+	}
+	var first T
+	if err := json.Unmarshal(stored.Response, &first); err != nil {
+		return zero, fmt.Errorf("decode stored response: %w", err)
+	}
+	return first, nil
+}
+
+func priorityOf(body CreateNotificationRequest) Priority {
+	if body.Priority == nil {
+		return Normal
+	}
+	return *body.Priority
+}
+
+func validateRequest(body CreateNotificationRequest, priority Priority) (int16, error) {
+	priorityValue, ok := priorities[priority]
+	if !ok {
+		return 0, errors.New("priority must be one of high, normal, low")
+	}
+	if err := validate.Notification(string(body.Channel), body.Recipient, body.Content); err != nil {
+		return 0, err
+	}
+	return priorityValue, nil
+}
+
+func validIdempotencyKey(key *string) bool {
+	return key == nil || (*key != "" && len(*key) <= maxIdempotencyKeyBytes)
 }
 
 func toNotification(row store.Notification) (Notification, error) {

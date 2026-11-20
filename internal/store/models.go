@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type IdempotencyKey struct {
@@ -25,4 +26,5 @@ type Notification struct {
 	Priority  int16
 	Status    string
 	CreatedAt time.Time
+	BatchID   pgtype.UUID
 }

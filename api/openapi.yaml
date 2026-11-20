@@ -8,15 +8,7 @@ paths:
       operationId: createNotification
       summary: Create a notification
       parameters:
-        - name: Idempotency-Key
-          in: header
-          description: >-
-            Makes the request safe to retry. A repeat with the same key and the
-            same body returns the first response and creates nothing.
-          schema:
-            type: string
-            minLength: 1
-            maxLength: 255
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -63,6 +55,65 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/notifications/batch:
+    post:
+      operationId: createBatch
+      summary: Create up to 1000 notifications
+      description: >-
+        Each notification is validated on its own. The valid ones are created
+        together, and the others are reported with the reason. Rejected
+        notifications are not stored.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBatchRequest"
+      responses:
+        "202":
+          description: At least one notification was accepted for delivery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchCreated"
+        "400":
+          description: >-
+            The request body is not a valid JSON object, has a field of the
+            wrong type, or the Idempotency-Key is sent more than once or is
+            not 1 to 255 bytes long. A field of the wrong type in one
+            notification rejects the whole batch. Nothing was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The Idempotency-Key was already used with a different request body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: The request body is larger than 10 MB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: >-
+            No notification in the batch is valid, or the batch does not hold
+            1 to 1000 notifications. Nothing was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchRejected"
+        "500":
+          description: The server failed to store the batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/notifications/{id}:
     get:
       operationId: getNotification
@@ -99,7 +150,54 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/batches/{id}:
+    get:
+      operationId: getBatch
+      summary: Get the status counts of a batch
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: How many notifications of the batch are in each status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Batch"
+        "400":
+          description: The id is not a UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No batch has this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: The server failed to read the batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: >-
+        Makes the request safe to retry. A repeat with the same key and the
+        same body returns the first response and creates nothing.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
   schemas:
     Channel:
       type: string
@@ -144,6 +242,79 @@ components:
         created_at:
           type: string
           format: date-time
+    CreateBatchRequest:
+      type: object
+      required: [notifications]
+      properties:
+        notifications:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/CreateNotificationRequest"
+    BatchItemResult:
+      type: object
+      description: >-
+        The outcome for the notification at one position of the request. An
+        accepted one has an id, a rejected one has an error.
+      required: [index]
+      properties:
+        index:
+          type: integer
+          description: Position of the notification in the request, from 0.
+        id:
+          type: string
+          format: uuid
+        error:
+          type: string
+    BatchCreated:
+      type: object
+      required: [batch_id, results]
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/BatchItemResult"
+    BatchRejected:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        results:
+          type: array
+          description: Present when every notification failed validation.
+          items:
+            $ref: "#/components/schemas/BatchItemResult"
+    Batch:
+      type: object
+      description: Counts cover the accepted notifications of the batch.
+      required: [id, total, pending, processing, sent, failed, cancelled]
+      properties:
+        id:
+          type: string
+          format: uuid
+        total:
+          type: integer
+          format: int64
+        pending:
+          type: integer
+          format: int64
+        processing:
+          type: integer
+          format: int64
+        sent:
+          type: integer
+          format: int64
+        failed:
+          type: integer
+          format: int64
+        cancelled:
+          type: integer
+          format: int64
     Error:
       type: object
       required: [message]

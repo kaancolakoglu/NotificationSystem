@@ -86,8 +86,47 @@ func (e Status) Valid() bool {
 	}
 }
 
+// Batch Counts cover the accepted notifications of the batch.
+type Batch struct {
+	Cancelled  int64              `json:"cancelled"`
+	Failed     int64              `json:"failed"`
+	Id         openapi_types.UUID `json:"id"`
+	Pending    int64              `json:"pending"`
+	Processing int64              `json:"processing"`
+	Sent       int64              `json:"sent"`
+	Total      int64              `json:"total"`
+}
+
+// BatchCreated defines model for BatchCreated.
+type BatchCreated struct {
+	BatchId openapi_types.UUID `json:"batch_id"`
+	Results []BatchItemResult  `json:"results"`
+}
+
+// BatchItemResult The outcome for the notification at one position of the request. An accepted one has an id, a rejected one has an error.
+type BatchItemResult struct {
+	Error *string             `json:"error,omitempty"`
+	Id    *openapi_types.UUID `json:"id,omitempty"`
+
+	// Index Position of the notification in the request, from 0.
+	Index int `json:"index"`
+}
+
+// BatchRejected defines model for BatchRejected.
+type BatchRejected struct {
+	Message string `json:"message"`
+
+	// Results Present when every notification failed validation.
+	Results *[]BatchItemResult `json:"results,omitempty"`
+}
+
 // Channel defines model for Channel.
 type Channel string
+
+// CreateBatchRequest defines model for CreateBatchRequest.
+type CreateBatchRequest struct {
+	Notifications []CreateNotificationRequest `json:"notifications"`
+}
 
 // CreateNotificationRequest defines model for CreateNotificationRequest.
 type CreateNotificationRequest struct {
@@ -119,20 +158,38 @@ type Priority string
 // Status defines model for Status.
 type Status string
 
+// IdempotencyKey defines model for IdempotencyKey.
+type IdempotencyKey = string
+
 // CreateNotificationParams defines parameters for CreateNotification.
 type CreateNotificationParams struct {
 	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing.
-	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+}
+
+// CreateBatchParams defines parameters for CreateBatch.
+type CreateBatchParams struct {
+	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 }
 
 // CreateNotificationJSONRequestBody defines body for CreateNotification for application/json ContentType.
 type CreateNotificationJSONRequestBody = CreateNotificationRequest
 
+// CreateBatchJSONRequestBody defines body for CreateBatch for application/json ContentType.
+type CreateBatchJSONRequestBody = CreateBatchRequest
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// GetBatch Get the status counts of a batch
+	// (GET /v1/batches/{id})
+	GetBatch(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
 	// CreateNotification Create a notification
 	// (POST /v1/notifications)
 	CreateNotification(w http.ResponseWriter, r *http.Request, params CreateNotificationParams)
+	// CreateBatch Create up to 1000 notifications
+	// (POST /v1/notifications/batch)
+	CreateBatch(w http.ResponseWriter, r *http.Request, params CreateBatchParams)
 	// GetNotification Get a notification by id
 	// (GET /v1/notifications/{id})
 	GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
@@ -147,6 +204,32 @@ type ServerInterfaceWrapper struct {
 
 type MiddlewareFunc func(http.Handler) http.Handler
 
+// GetBatch operation middleware
+func (siw *ServerInterfaceWrapper) GetBatch(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBatch(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // CreateNotification operation middleware
 func (siw *ServerInterfaceWrapper) CreateNotification(w http.ResponseWriter, r *http.Request) {
 
@@ -160,7 +243,7 @@ func (siw *ServerInterfaceWrapper) CreateNotification(w http.ResponseWriter, r *
 
 	// ------------- Optional header parameter "Idempotency-Key" -------------
 	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
-		var IdempotencyKey string
+		var IdempotencyKey IdempotencyKey
 		n := len(valueList)
 		if n != 1 {
 			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
@@ -179,6 +262,47 @@ func (siw *ServerInterfaceWrapper) CreateNotification(w http.ResponseWriter, r *
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CreateNotification(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateBatch operation middleware
+func (siw *ServerInterfaceWrapper) CreateBatch(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CreateBatchParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateBatch(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -335,9 +459,75 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	}
 
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/notifications", wrapper.CreateNotification)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/notifications/batch", wrapper.CreateBatch)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/notifications/{id}", wrapper.GetNotification)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/batches/{id}", wrapper.GetBatch)
 
 	return m
+}
+
+type GetBatchRequestObject struct {
+	Id openapi_types.UUID `json:"id"`
+}
+
+type GetBatchResponseObject interface {
+	VisitGetBatchResponse(w http.ResponseWriter) error
+}
+
+type GetBatch200JSONResponse Batch
+
+func (response GetBatch200JSONResponse) VisitGetBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBatch400JSONResponse Error
+
+func (response GetBatch400JSONResponse) VisitGetBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBatch404JSONResponse Error
+
+func (response GetBatch404JSONResponse) VisitGetBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBatch500JSONResponse Error
+
+func (response GetBatch500JSONResponse) VisitGetBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type CreateNotificationRequestObject struct {
@@ -433,6 +623,99 @@ func (response CreateNotification500JSONResponse) VisitCreateNotificationRespons
 	return err
 }
 
+type CreateBatchRequestObject struct {
+	Params CreateBatchParams
+	Body   *CreateBatchJSONRequestBody
+}
+
+type CreateBatchResponseObject interface {
+	VisitCreateBatchResponse(w http.ResponseWriter) error
+}
+
+type CreateBatch202JSONResponse BatchCreated
+
+func (response CreateBatch202JSONResponse) VisitCreateBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBatch400JSONResponse Error
+
+func (response CreateBatch400JSONResponse) VisitCreateBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBatch409JSONResponse Error
+
+func (response CreateBatch409JSONResponse) VisitCreateBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBatch413JSONResponse Error
+
+func (response CreateBatch413JSONResponse) VisitCreateBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(413)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBatch422JSONResponse BatchRejected
+
+func (response CreateBatch422JSONResponse) VisitCreateBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBatch500JSONResponse Error
+
+func (response CreateBatch500JSONResponse) VisitCreateBatchResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetNotificationRequestObject struct {
 	Id openapi_types.UUID `json:"id"`
 }
@@ -499,9 +782,15 @@ func (response GetNotification500JSONResponse) VisitGetNotificationResponse(w ht
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// GetBatch Get the status counts of a batch
+	// (GET /v1/batches/{id})
+	GetBatch(ctx context.Context, request GetBatchRequestObject) (GetBatchResponseObject, error)
 	// CreateNotification Create a notification
 	// (POST /v1/notifications)
 	CreateNotification(ctx context.Context, request CreateNotificationRequestObject) (CreateNotificationResponseObject, error)
+	// CreateBatch Create up to 1000 notifications
+	// (POST /v1/notifications/batch)
+	CreateBatch(ctx context.Context, request CreateBatchRequestObject) (CreateBatchResponseObject, error)
 	// GetNotification Get a notification by id
 	// (GET /v1/notifications/{id})
 	GetNotification(ctx context.Context, request GetNotificationRequestObject) (GetNotificationResponseObject, error)
@@ -546,6 +835,32 @@ type strictHandler struct {
 	options     StrictHTTPServerOptions
 }
 
+// GetBatch operation middleware
+func (sh *strictHandler) GetBatch(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+	var request GetBatchRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBatch(ctx, request.(GetBatchRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBatch")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBatchResponseObject); ok {
+		if err := validResponse.VisitGetBatchResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // CreateNotification operation middleware
 func (sh *strictHandler) CreateNotification(w http.ResponseWriter, r *http.Request, params CreateNotificationParams) {
 	var request CreateNotificationRequestObject
@@ -572,6 +887,39 @@ func (sh *strictHandler) CreateNotification(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(CreateNotificationResponseObject); ok {
 		if err := validResponse.VisitCreateNotificationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateBatch operation middleware
+func (sh *strictHandler) CreateBatch(w http.ResponseWriter, r *http.Request, params CreateBatchParams) {
+	var request CreateBatchRequestObject
+
+	request.Params = params
+
+	var body CreateBatchJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateBatch(ctx, request.(CreateBatchRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateBatch")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateBatchResponseObject); ok {
+		if err := validResponse.VisitCreateBatchResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

@@ -9,7 +9,43 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countBatchByStatus = `-- name: CountBatchByStatus :one
+SELECT
+    count(*) AS total,
+    count(*) FILTER (WHERE status = 'pending') AS pending,
+    count(*) FILTER (WHERE status = 'processing') AS processing,
+    count(*) FILTER (WHERE status = 'sent') AS sent,
+    count(*) FILTER (WHERE status = 'failed') AS failed,
+    count(*) FILTER (WHERE status = 'cancelled') AS cancelled
+FROM notifications
+WHERE batch_id = $1
+`
+
+type CountBatchByStatusRow struct {
+	Total      int64
+	Pending    int64
+	Processing int64
+	Sent       int64
+	Failed     int64
+	Cancelled  int64
+}
+
+func (q *Queries) CountBatchByStatus(ctx context.Context, batchID pgtype.UUID) (CountBatchByStatusRow, error) {
+	row := q.db.QueryRow(ctx, countBatchByStatus, batchID)
+	var i CountBatchByStatusRow
+	err := row.Scan(
+		&i.Total,
+		&i.Pending,
+		&i.Processing,
+		&i.Sent,
+		&i.Failed,
+		&i.Cancelled,
+	)
+	return i, err
+}
 
 const getIdempotencyKey = `-- name: GetIdempotencyKey :one
 SELECT request_hash, response FROM idempotency_keys
@@ -29,7 +65,7 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, key string) (GetIdempot
 }
 
 const getNotification = `-- name: GetNotification :one
-SELECT id, recipient, channel, content, priority, status, created_at FROM notifications
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id FROM notifications
 WHERE id = $1
 `
 
@@ -44,8 +80,18 @@ func (q *Queries) GetNotification(ctx context.Context, id uuid.UUID) (Notificati
 		&i.Priority,
 		&i.Status,
 		&i.CreatedAt,
+		&i.BatchID,
 	)
 	return i, err
+}
+
+type InsertBatchNotificationsParams struct {
+	ID        uuid.UUID
+	Recipient string
+	Channel   string
+	Content   string
+	Priority  int16
+	BatchID   pgtype.UUID
 }
 
 const insertIdempotencyKey = `-- name: InsertIdempotencyKey :execrows
@@ -71,7 +117,7 @@ func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotenc
 const insertNotification = `-- name: InsertNotification :one
 INSERT INTO notifications (id, recipient, channel, content, priority)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, recipient, channel, content, priority, status, created_at
+RETURNING id, recipient, channel, content, priority, status, created_at, batch_id
 `
 
 type InsertNotificationParams struct {
@@ -99,6 +145,7 @@ func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotification
 		&i.Priority,
 		&i.Status,
 		&i.CreatedAt,
+		&i.BatchID,
 	)
 	return i, err
 }

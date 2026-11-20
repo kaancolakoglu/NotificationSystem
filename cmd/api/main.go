@@ -19,6 +19,7 @@ const (
 	addr              = ":8080"
 	readHeaderTimeout = 5 * time.Second
 	maxBodyBytes      = 1 << 20
+	maxBatchBodyBytes = 10 << 20
 )
 
 func main() {
@@ -64,5 +65,9 @@ func newHandler(pool *pgxpool.Pool, logger *slog.Logger) http.Handler {
 		}
 	})
 	api.Register(mux, pool, logger)
-	return http.MaxBytesHandler(mux, maxBodyBytes)
+
+	limited := http.NewServeMux()
+	limited.Handle("/", http.MaxBytesHandler(mux, maxBodyBytes))
+	limited.Handle("POST /v1/notifications/batch", http.MaxBytesHandler(mux, maxBatchBodyBytes))
+	return limited
 }
