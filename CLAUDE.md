@@ -74,7 +74,13 @@ These are settled. Raise it before changing one.
   itself.
 - Postgres through `pgx/v5` and `pgxpool`. Queries with sqlc in pgx/v5 mode.
 - Migrations: goose SQL files in `migrations/`, applied by `cmd/migrate`
-  using goose as a library with embedded files.
+  using goose as a library with embedded files. A run holds a Postgres
+  advisory lock. Reason: two runs at once both tried the same migration, and
+  the loser exited with an error. A run waiting for the lock checks again
+  every second, for at most 4 minutes. `cmd/migrate` gives up after 5
+  minutes. Reason: a database that accepts the connection and never answers
+  would hang it forever. The lock wait is the shorter one, so the error
+  says which of the two happened.
 - Redis: `go-redis/v9`. Limiter: `redis_rate` (GCRA).
 - Circuit breaker: `sony/gobreaker/v2`.
 - IDs: UUIDv7 from `google/uuid`, generated in the API.

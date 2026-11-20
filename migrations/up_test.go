@@ -1,0 +1,70 @@
+package migrations_test
+
+import (
+	"errors"
+	"sync"
+	"testing"
+
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
+
+	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
+	"github.com/kaancolakoglu/NotificationSystem/migrations"
+)
+
+func TestSimultaneousUpAppliesEachMigrationOnce(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := t.Context()
+
+	const countApplied = "SELECT count(*), count(DISTINCT version_id) FROM goose_db_version WHERE version_id > 0"
+	var want, wantDistinct int
+	if err := pool.QueryRow(ctx, countApplied).Scan(&want, &wantDistinct); err != nil {
+		t.Fatalf("count migrations applied by one run: %v", err)
+	}
+	if want == 0 || want != wantDistinct {
+		t.Fatalf("one run left %d rows for %d versions, want the same number above 0", want, wantDistinct)
+	}
+
+	db := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.Files)
+	if err != nil {
+		t.Fatalf("create migration provider: %v", err)
+	}
+	if _, err := provider.DownTo(ctx, 0); err != nil {
+		t.Fatalf("roll every migration back: %v", err)
+	}
+
+	errs := make([]error, 3)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range errs {
+		db := stdlib.OpenDB(*pool.Config().ConnConfig)
+		if err := db.PingContext(ctx); err != nil {
+			t.Fatalf("connect run %d: %v", i, err)
+		}
+		wg.Go(func() {
+			<-start
+			errs[i] = errors.Join(migrations.Up(ctx, db), db.Close())
+		})
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("run %d: %v", i, err)
+		}
+	}
+
+	var applied, distinct int
+	if err := pool.QueryRow(ctx, countApplied).Scan(&applied, &distinct); err != nil {
+		t.Fatalf("count applied migrations: %v", err)
+	}
+	if applied != want || distinct != want {
+		t.Errorf("version table holds %d rows for %d versions, want %d of each", applied, distinct, want)
+	}
+}
