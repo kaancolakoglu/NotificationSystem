@@ -267,6 +267,28 @@ func TestPermanentFailureIsNotRetried(t *testing.T) {
 	}
 }
 
+func TestProviderAnswerIsStoredAsTheLastError(t *testing.T) {
+	const failure = "provider answered 400, want 202: bad \uFFFD input"
+	db := testdb.New(t)
+	queries := store.New(db)
+	_, client := newProvider(t, func(w http.ResponseWriter) error {
+		w.WriteHeader(http.StatusBadRequest)
+		_, err := io.WriteString(w, "bad\x00 \xff input\n")
+		return err
+	})
+	created := insert(t, queries, "sms", 1)
+
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	waitFor(t, "the notification is failed", func() bool { return get(t, queries, created.ID).Status == "failed" })
+
+	if stored := get(t, queries, created.ID); stored.LastError.String != failure {
+		t.Errorf("last error = %q, want %q", stored.LastError.String, failure)
+	}
+	if history := attempts(t, queries, created.ID); len(history) != 1 || history[0].Error.String != failure {
+		t.Errorf("delivery attempts = %+v, want one with the error %q", history, failure)
+	}
+}
+
 func TestRetryableFailureIsSentAgain(t *testing.T) {
 	const failure = "provider answered 500, want 202"
 	db := testdb.New(t)

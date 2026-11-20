@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +20,7 @@ import (
 const (
 	timeout       = 5 * time.Second
 	maxRetryAfter = 60 * time.Second
+	maxErrorBody  = 200
 )
 
 type Message struct {
@@ -45,11 +49,11 @@ type Client struct {
 	logger *slog.Logger
 }
 
-func New(url string, connections int, logger *slog.Logger) *Client {
+func New(providerURL string, connections int, logger *slog.Logger) *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = connections
 	return &Client{
-		url: url,
+		url: providerURL,
 		http: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
@@ -75,6 +79,10 @@ func (c *Client) Send(ctx context.Context, id uuid.UUID, message Message) (strin
 
 	response, err := c.http.Do(request)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
 		return "", &Error{Retryable: true, err: fmt.Errorf("call provider: %w", err)}
 	}
 	defer func() {
@@ -84,7 +92,11 @@ func (c *Client) Send(ctx context.Context, id uuid.UUID, message Message) (strin
 	}()
 
 	if response.StatusCode != http.StatusAccepted {
-		return "", statusError(response)
+		body, err := io.ReadAll(io.LimitReader(response.Body, maxErrorBody))
+		if err != nil {
+			c.logger.WarnContext(ctx, "read provider response", "notification_id", id, "error", err)
+		}
+		return "", statusError(response, body)
 	}
 
 	var accepted struct {
@@ -100,8 +112,13 @@ func (c *Client) Send(ctx context.Context, id uuid.UUID, message Message) (strin
 	return accepted.MessageID, nil
 }
 
-func statusError(response *http.Response) *Error {
-	e := &Error{err: fmt.Errorf("provider answered %d, want %d", response.StatusCode, http.StatusAccepted)}
+func statusError(response *http.Response, body []byte) *Error {
+	text := fmt.Sprintf("provider answered %d, want %d", response.StatusCode, http.StatusAccepted)
+	answer := strings.TrimSpace(strings.ReplaceAll(strings.ToValidUTF8(string(body), "\uFFFD"), "\x00", ""))
+	if answer != "" {
+		text += ": " + answer
+	}
+	e := &Error{err: errors.New(text)}
 	switch {
 	case response.StatusCode == http.StatusTooManyRequests:
 		e.Retryable = true

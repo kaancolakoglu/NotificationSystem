@@ -151,6 +151,13 @@ These are settled. Raise it before changing one.
   whose body has no readable `messageId` is still a success, and is logged.
   Reason: the provider has accepted it, so failing it would report it wrong
   and retrying would send it twice.
+- The error of a failed call is stored in `last_error` and shown by the API.
+  For an answer that is not 202 it holds the status and the first 200 bytes
+  of the answer, without NUL characters, with invalid UTF-8 replaced and
+  with white space at the ends removed.
+  Reason: Postgres text cannot store those, so the result write would fail.
+  For a call that got no answer it holds the cause without the provider URL.
+  Reason: a webhook.site URL contains the token. The host can still appear.
 - Error classes: retry on transport errors, timeouts, 408, 429 and 5xx. Any
   other answer that is not 202 goes to `failed` at once: another 4xx, a 2xx
   such as 200, and a redirect, which is not followed. Reason: Go follows a

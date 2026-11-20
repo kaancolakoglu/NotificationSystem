@@ -20,6 +20,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const urlToken = "secret-token"
+
 var (
 	notificationID = uuid.MustParse("019a0000-0000-7000-8000-000000000000")
 	message        = Message{To: "+905551234567", Channel: "sms", Content: "hello"}
@@ -30,7 +32,7 @@ func newClient(t *testing.T, handler http.HandlerFunc) (*Client, *bytes.Buffer) 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	var logs bytes.Buffer
-	return New(server.URL, 1, slog.New(slog.NewJSONHandler(&logs, nil))), &logs
+	return New(server.URL+"/"+urlToken, 1, slog.New(slog.NewJSONHandler(&logs, nil))), &logs
 }
 
 func sendError(t *testing.T, client *Client) *Error {
@@ -222,6 +224,9 @@ func TestSendTimesOut(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error = %v, want a deadline exceeded error", err)
 	}
+	if strings.Contains(err.Error(), urlToken) {
+		t.Errorf("error = %q, want it without the provider URL", err)
+	}
 }
 
 func TestSendStopsWhenTheContextIsCancelled(t *testing.T) {
@@ -247,6 +252,9 @@ func TestSendStopsWhenTheContextIsCancelled(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want a cancelled error", err)
+	}
+	if strings.Contains(err.Error(), urlToken) {
+		t.Errorf("error = %q, want it without the provider URL", err)
 	}
 	if requests != 0 {
 		t.Errorf("provider got %d requests, want 0", requests)
@@ -302,12 +310,50 @@ func TestSendReusesConnections(t *testing.T) {
 func TestSendTransportError(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	server.Close()
-	client := New(server.URL, 1, slog.New(slog.DiscardHandler))
+	client := New(server.URL+"/"+urlToken, 1, slog.New(slog.DiscardHandler))
 
 	err := sendError(t, client)
 
 	if !err.Retryable {
 		t.Error("retryable = false, want true")
+	}
+	if !strings.HasPrefix(err.Error(), "call provider: dial tcp ") || strings.Contains(err.Error(), urlToken) {
+		t.Errorf("error = %q, want the dial error without the provider URL", err)
+	}
+}
+
+func TestSendPutsTheProviderAnswerInTheError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "rejected", status: http.StatusBadRequest, body: `{"error":"recipient number is not valid"}` + "\n", want: `provider answered 400, want 202: {"error":"recipient number is not valid"}`},
+		{name: "retryable", status: http.StatusServiceUnavailable, body: "try later", want: "provider answered 503, want 202: try later"},
+		{name: "only white space", status: http.StatusBadRequest, body: " \r\n", want: "provider answered 400, want 202"},
+		{name: "longer than the limit", status: http.StatusBadRequest, body: strings.Repeat("a", 200) + "b", want: "provider answered 400, want 202: " + strings.Repeat("a", 200)},
+		{name: "cut inside a character", status: http.StatusBadRequest, body: strings.Repeat("a", 199) + "é", want: "provider answered 400, want 202: " + strings.Repeat("a", 199) + "\uFFFD"},
+		{name: "NUL and invalid UTF-8", status: http.StatusBadRequest, body: "bad\x00 \xff input", want: "provider answered 400, want 202: bad \uFFFD input"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				if _, err := io.WriteString(w, tt.body); err != nil {
+					t.Errorf("write answer: %v", err)
+				}
+			})
+
+			err := sendError(t, client)
+
+			if err.Error() != tt.want {
+				t.Errorf("error = %q, want %q", err, tt.want)
+			}
+			if want := tt.status == http.StatusServiceUnavailable; err.Retryable != want {
+				t.Errorf("retryable = %t, want %t", err.Retryable, want)
+			}
+		})
 	}
 }
 
