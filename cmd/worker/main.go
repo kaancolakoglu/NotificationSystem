@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	poolSize        = 20
-	pollInterval    = 200 * time.Millisecond
-	databaseTimeout = 5 * time.Second
-	backoffBase     = time.Second
-	sweepInterval   = 15 * time.Second
+	poolSize          = 20
+	pollInterval      = 200 * time.Millisecond
+	databaseTimeout   = 5 * time.Second
+	backoffBase       = time.Second
+	sweepInterval     = 15 * time.Second
+	keyExpiryInterval = time.Minute
 )
 
 var channels = []string{"sms", "email", "push"}
@@ -78,6 +79,14 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL stri
 			Queries:      queries,
 			Logger:       logger,
 			Interval:     sweepInterval,
+			QueryTimeout: timeout,
+		}.Run(ctx)
+	})
+	loops.Go(func() {
+		worker.KeyExpirer{
+			Queries:      queries,
+			Logger:       logger,
+			Interval:     keyExpiryInterval,
 			QueryTimeout: timeout,
 		}.Run(ctx)
 	})

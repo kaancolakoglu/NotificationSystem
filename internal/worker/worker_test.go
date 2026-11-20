@@ -53,7 +53,7 @@ func (b *syncBuffer) lineWith(parts ...string) bool {
 	return false
 }
 
-func lockTable(t *testing.T, db *pgxpool.Pool) (pgx.Tx, error) {
+func lockTable(t *testing.T, db *pgxpool.Pool, table string) (pgx.Tx, error) {
 	tx, err := db.Begin(t.Context())
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
@@ -63,7 +63,7 @@ func lockTable(t *testing.T, db *pgxpool.Pool) (pgx.Tx, error) {
 			t.Errorf("release table lock: %v", err)
 		}
 	})
-	if _, err := tx.Exec(t.Context(), "LOCK TABLE notifications IN ACCESS EXCLUSIVE MODE"); err != nil {
+	if _, err := tx.Exec(t.Context(), "LOCK TABLE "+pgx.Identifier{table}.Sanitize()+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		return nil, fmt.Errorf("lock table: %w", err)
 	}
 	return tx, nil
@@ -609,7 +609,7 @@ func TestClaimGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 	_, client := newProvider(t, accept)
 	insert(t, queries, "sms", 1)
 	var logs syncBuffer
-	lock, err := lockTable(t, db)
+	lock, err := lockTable(t, db, "notifications")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,7 +645,7 @@ func TestResultWriteGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 			queries := store.New(db)
 			locked := make(chan error, 1)
 			fake, client := newProvider(t, func(w http.ResponseWriter) error {
-				_, err := lockTable(t, db)
+				_, err := lockTable(t, db, "notifications")
 				locked <- err
 				return tt.answer(w)
 			})
@@ -795,7 +795,7 @@ func TestSweepGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 	lost := insert(t, queries, "sms", 1)
 	hold(t, db, lost.ID, 1, "-1 second")
 	var logs syncBuffer
-	lock, err := lockTable(t, db)
+	lock, err := lockTable(t, db, "notifications")
 	if err != nil {
 		t.Fatal(err)
 	}

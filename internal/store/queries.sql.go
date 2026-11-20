@@ -138,6 +138,19 @@ func (q *Queries) CountBatchByStatus(ctx context.Context, batchID pgtype.UUID) (
 	return i, err
 }
 
+const deleteExpiredIdempotencyKeys = `-- name: DeleteExpiredIdempotencyKeys :execrows
+DELETE FROM idempotency_keys
+WHERE created_at < now() - interval '24 hours'
+`
+
+func (q *Queries) DeleteExpiredIdempotencyKeys(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredIdempotencyKeys)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getIdempotencyKey = `-- name: GetIdempotencyKey :one
 SELECT request_hash, response FROM idempotency_keys
 WHERE key = $1

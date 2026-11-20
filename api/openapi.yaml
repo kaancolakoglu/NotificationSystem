@@ -320,7 +320,9 @@ components:
       in: header
       description: >-
         Makes the request safe to retry. A repeat with the same key and the
-        same body returns the first response and creates nothing.
+        same body returns the first response and creates nothing. A key is
+        kept for at least 24 hours. Once it is deleted, a request with that
+        key is handled as a new one.
       schema:
         type: string
         minLength: 1

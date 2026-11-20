@@ -232,13 +232,13 @@ type ListNotificationsParams struct {
 
 // CreateNotificationParams defines parameters for CreateNotification.
 type CreateNotificationParams struct {
-	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing.
+	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing. A key is kept for at least 24 hours. Once it is deleted, a request with that key is handled as a new one.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 }
 
 // CreateBatchParams defines parameters for CreateBatch.
 type CreateBatchParams struct {
-	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing.
+	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing. A key is kept for at least 24 hours. Once it is deleted, a request with that key is handled as a new one.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 }
 

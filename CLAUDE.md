@@ -138,6 +138,15 @@ These are settled. Raise it before changing one.
   do not matter. A key is 1 to 255 bytes, else 400. Only an accepted request
   stores its key: a rejected one can be corrected and sent again with the
   same key.
+- A key is kept for 24 hours, then deleted. Every worker runs the DELETE
+  once a minute, and a key still replays until that run. Reason: a key is
+  only useful while the client retries, and the stored responses would
+  grow the table forever. A request with a deleted key is handled as a
+  new one. Backed by an index on `created_at`. Reason: without it every
+  run read the whole table, 2.4 GB at 5 million keys. The cost: the DELETE
+  has the worker's 5 s like any database call. A backlog it cannot delete
+  in that time, about 2 million keys on an idle database, fails every
+  minute with an error until someone deletes it by hand.
 - Pagination is keyset on `id` descending with an opaque cursor. Limit is 1
   to 200, default 50, else 400.
 - List filters: status, channel, batch_id, created from and to. Every invalid
@@ -260,7 +269,7 @@ internal/api        generated server and handlers
 internal/validate   per-channel rules
 internal/store      sqlc queries and generated code
 internal/provider   HTTP client, error classes
-internal/worker     poll loop, pools, retry, sweeper
+internal/worker     poll loop, pools, retry, sweeper, key expiry
 internal/ratelimit
 internal/obs        logging, metrics
 migrations/

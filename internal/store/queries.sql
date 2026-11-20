@@ -22,6 +22,10 @@ ON CONFLICT (key) DO NOTHING;
 SELECT request_hash, response FROM idempotency_keys
 WHERE key = $1;
 
+-- name: DeleteExpiredIdempotencyKeys :execrows
+DELETE FROM idempotency_keys
+WHERE created_at < now() - interval '24 hours';
+
 -- name: InsertBatchNotifications :copyfrom
 INSERT INTO notifications (id, recipient, channel, content, priority, batch_id)
 VALUES ($1, $2, $3, $4, $5, $6);
