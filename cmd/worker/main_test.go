@@ -142,6 +142,51 @@ func TestRunKeepsTheProviderLimit(t *testing.T) {
 	}
 }
 
+func TestRunLetsASendInFlightFinishAfterItIsToldToStop(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	arrived, stopSeen := make(chan struct{}, 1), make(chan struct{})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		arrived <- struct{}{}
+		<-stopSeen
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(provider.Close)
+	unblockProvider := sync.OnceFunc(func() { close(stopSeen) })
+	t.Cleanup(unblockProvider)
+	row, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{ID: uuid.Must(uuid.NewV7()), Recipient: "+905551234567", Channel: "sms", Content: "hello", Priority: 1})
+	if err != nil {
+		t.Fatalf("insert notification: %v", err)
+	}
+
+	redisOptions := testredis.New(t).Options()
+	redisURL := fmt.Sprintf("redis://%s/%d", redisOptions.Addr, redisOptions.DB)
+	ctx, cancel := context.WithCancel(t.Context())
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, 5*time.Second)
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatal("timed out waiting until the provider gets the notification")
+	}
+	cancel()
+	unblockProvider()
+
+	if err := <-stopped; err != nil {
+		t.Errorf("run returned %v after it was told to stop, want no error", err)
+	}
+	stored, err := queries.GetNotification(t.Context(), row.ID)
+	if err != nil {
+		t.Fatalf("get notification: %v", err)
+	}
+	if stored.Status != "sent" {
+		t.Errorf("notification in flight at the stop is %s, want sent", stored.Status)
+	}
+}
+
 func TestRunSendsANotificationOnEveryChannel(t *testing.T) {
 	db := testdb.New(t)
 	queries := store.New(db)

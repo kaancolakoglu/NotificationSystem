@@ -38,11 +38,13 @@ func TestShutdownLetsASendInFlightFinishAndClaimsNothingMore(t *testing.T) {
 		return accept(w)
 	})
 	inFlight := insert(t, queries, "sms", 1)
+	var logs syncBuffer
 
-	stop, stopped := runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Minute, ShutdownTimeout: time.Minute})
+	stop, stopped := runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Minute, ShutdownTimeout: time.Minute})
 	t.Cleanup(unblockProvider)
 	waitToReceive(t, "the provider gets the notification", arrived)
 	stop()
+	time.Sleep(20 * pollInterval)
 	late := insert(t, queries, "sms", 1)
 	time.Sleep(20 * pollInterval)
 
@@ -63,6 +65,9 @@ func TestShutdownLetsASendInFlightFinishAndClaimsNothingMore(t *testing.T) {
 	}
 	if calls := len(fake.keys()); calls != 1 {
 		t.Errorf("provider got %d requests, want 1", calls)
+	}
+	if logs.lineWith(releasedAtStop) {
+		t.Error("a notification was claimed and released after the stop, want no claim")
 	}
 }
 
@@ -92,8 +97,8 @@ func TestShutdownReleasesANotificationThatWaitsForItsToken(t *testing.T) {
 	if calls := len(fake.keys()); calls != sent {
 		t.Errorf("provider got %d requests, want %d", calls, sent)
 	}
-	if lines := logs.linesWith(`"level":"INFO"`, releasedAtStop, `"channel":"sms"`); lines != pending {
-		t.Errorf("logs have %d lines for a notification released at the stop, want %d", lines, pending)
+	if lines := logs.linesWith(`"level":"INFO"`, releasedAtStop, `"channel":"sms"`); lines < pending || lines > 2*pending {
+		t.Errorf("logs have %d lines for a notification released at the stop, want %d, or up to twice that when a claim in progress at the stop took a released one again", lines, pending)
 	}
 	if logs.lineWith(`"level":"ERROR"`) {
 		t.Error("logs have an error line, want none: a stop is not a failed rate limiter")
