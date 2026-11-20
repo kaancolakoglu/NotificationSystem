@@ -170,6 +170,11 @@ These are settled. Raise it before changing one.
 - Worker: per channel, a pool of 20 goroutines fed by a Go channel. Poll
   every 200 ms. Claim at most the pool's free capacity. Query once per
   priority, high first.
+- The worker gives each database call 5 s, the ping at start included.
+  Reason: with a database that stopped answering, a pool froze and logged
+  nothing. A call that times out is logged, a result write with the provider
+  message id. The statement may still finish on the server, so a claim that
+  timed out can leave rows `processing` that no sender holds.
 - The provider client keeps one idle connection per sender, 60 in total.
   Reason: Go keeps 2 per host, and each poll starts up to 20 sends at once
   per channel. Measured with 2: 1443 connections for 1500 sends.

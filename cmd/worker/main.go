@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	poolSize     = 20
-	pollInterval = 200 * time.Millisecond
+	poolSize        = 20
+	pollInterval    = 200 * time.Millisecond
+	databaseTimeout = 5 * time.Second
 )
 
 var channels = []string{"sms", "email", "push"}
@@ -27,12 +28,12 @@ var channels = []string{"sms", "email", "push"}
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	err := run(context.Background(), logger, os.Getenv("DATABASE_URL"), os.Getenv("PROVIDER_URL"))
+	err := run(context.Background(), logger, os.Getenv("DATABASE_URL"), os.Getenv("PROVIDER_URL"), databaseTimeout)
 	logger.Error("worker exited", "error", err)
 	os.Exit(1)
 }
 
-func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL string) error {
+func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL string, timeout time.Duration) error {
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is not set")
 	}
@@ -46,7 +47,10 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL stri
 	}
 	defer pool.Close()
 
-	if err := pool.Ping(ctx); err != nil {
+	pingCtx, cancel := context.WithTimeout(ctx, timeout)
+	err = pool.Ping(pingCtx)
+	cancel()
+	if err != nil {
 		return fmt.Errorf("ping database: %w", err)
 	}
 
@@ -56,12 +60,13 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL stri
 	for _, channel := range channels {
 		pools.Go(func() {
 			worker.Pool{
-				Queries:  queries,
-				Provider: client,
-				Logger:   logger,
-				Channel:  channel,
-				Size:     poolSize,
-				Interval: pollInterval,
+				Queries:      queries,
+				Provider:     client,
+				Logger:       logger,
+				Channel:      channel,
+				Size:         poolSize,
+				Interval:     pollInterval,
+				QueryTimeout: timeout,
 			}.Run(ctx)
 		})
 	}

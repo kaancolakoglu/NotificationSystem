@@ -2,8 +2,10 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,7 +25,48 @@ import (
 	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
 )
 
-const pollInterval = 5 * time.Millisecond
+const (
+	pollInterval = 5 * time.Millisecond
+	queryTimeout = 5 * time.Second
+)
+
+type syncBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *syncBuffer) lineWith(parts ...string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for line := range strings.SplitSeq(b.buffer.String(), "\n") {
+		if !slices.ContainsFunc(parts, func(part string) bool { return !strings.Contains(line, part) }) {
+			return true
+		}
+	}
+	return false
+}
+
+func lockTable(t *testing.T, db *pgxpool.Pool) (pgx.Tx, error) {
+	tx, err := db.Begin(t.Context())
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	t.Cleanup(func() {
+		if err := tx.Rollback(context.WithoutCancel(t.Context())); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Errorf("release table lock: %v", err)
+		}
+	})
+	if _, err := tx.Exec(t.Context(), "LOCK TABLE notifications IN ACCESS EXCLUSIVE MODE"); err != nil {
+		return nil, fmt.Errorf("lock table: %w", err)
+	}
+	return tx, nil
+}
 
 type request struct {
 	key  string
@@ -137,7 +180,7 @@ func TestCreatedRowIsSent(t *testing.T) {
 	fake, client := newProvider(t, accept)
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval})
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout})
 	waitFor(t, "the notification is sent", func() bool { return get(t, queries, created.ID).Status == "sent" })
 	time.Sleep(10 * pollInterval)
 
@@ -176,7 +219,7 @@ func TestFailedSendIsMarkedFailed(t *testing.T) {
 	})
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval})
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout})
 	waitFor(t, "the notification is failed", func() bool { return get(t, queries, created.ID).Status == "failed" })
 	time.Sleep(10 * pollInterval)
 
@@ -200,7 +243,7 @@ func TestTwoPoolsNeverSendTheSameRow(t *testing.T) {
 	}
 
 	for range 2 {
-		runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "email", Size: 5, Interval: pollInterval})
+		runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "email", Size: 5, Interval: pollInterval, QueryTimeout: queryTimeout})
 	}
 	waitFor(t, "every notification is sent", func() bool { return countByStatus(t, db, "sent") == rows })
 	time.Sleep(10 * pollInterval)
@@ -222,7 +265,7 @@ func TestHighPriorityGoesFirst(t *testing.T) {
 		priority[insert(t, queries, "push", p).ID.String()] = p
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "push", Size: 1, Interval: pollInterval})
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "push", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout})
 	waitFor(t, "every notification is sent", func() bool { return countByStatus(t, db, "sent") == len(priority) })
 
 	var got []int16
@@ -247,7 +290,7 @@ func TestPoolClaimsOnlyItsFreeCapacity(t *testing.T) {
 		insert(t, queries, "sms", 1)
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: size, Interval: pollInterval})
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: size, Interval: pollInterval, QueryTimeout: queryTimeout})
 	waitFor(t, "the pool is full", func() bool { return len(fake.keys()) == size })
 	time.Sleep(10 * pollInterval)
 
@@ -270,7 +313,7 @@ func TestCancelledRowIsNeverSent(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: pollInterval})
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: pollInterval, QueryTimeout: queryTimeout})
 	waitFor(t, "the other notifications are sent", func() bool { return countByStatus(t, db, "sent") == 2 })
 	time.Sleep(10 * pollInterval)
 
@@ -289,7 +332,7 @@ func TestCancelRacingWithClaimHasOneWinner(t *testing.T) {
 	db := testdb.New(t)
 	queries := store.New(db)
 	fake, client := newProvider(t, accept)
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: time.Millisecond})
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: time.Millisecond, QueryTimeout: queryTimeout})
 
 	ids := make([]uuid.UUID, rows)
 	cancelled := make([]bool, rows)
@@ -335,7 +378,7 @@ func TestResultForARowThatIsNotProcessingIsLogged(t *testing.T) {
 	queries := store.New(db)
 	_, client := newProvider(t, accept)
 	var logs bytes.Buffer
-	pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 1, Interval: pollInterval}
+	pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout}
 	pending := insert(t, queries, "sms", 1)
 
 	pool.send(t.Context(), pending)
@@ -347,5 +390,76 @@ func TestResultForARowThatIsNotProcessingIsLogged(t *testing.T) {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("logs = %s, want them to contain %s", logs.String(), want)
 		}
+	}
+}
+
+func TestClaimGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	_, client := newProvider(t, accept)
+	insert(t, queries, "sms", 1)
+	var logs syncBuffer
+	lock, err := lockTable(t, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: 50 * time.Millisecond})
+	waitFor(t, "the claim gives up", func() bool {
+		return logs.lineWith(`"msg":"claim notifications"`, `"channel":"sms"`, "context deadline exceeded")
+	})
+
+	if err := lock.Rollback(t.Context()); err != nil {
+		t.Fatalf("release table lock: %v", err)
+	}
+	later := insert(t, queries, "sms", 1)
+	waitFor(t, "a notification created after the database answers again is sent", func() bool {
+		return get(t, queries, later.ID).Status == "sent"
+	})
+}
+
+func TestResultWriteGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
+	tests := []struct {
+		name          string
+		answer        func(w http.ResponseWriter) error
+		wantStatus    string
+		wantMessageID string
+	}{
+		{name: "sent", answer: accept, wantStatus: "sent", wantMessageID: "message-1"},
+		{name: "failed", answer: func(w http.ResponseWriter) error {
+			w.WriteHeader(http.StatusInternalServerError)
+			return nil
+		}, wantStatus: "failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := testdb.New(t)
+			queries := store.New(db)
+			locked := make(chan error, 1)
+			fake, client := newProvider(t, func(w http.ResponseWriter) error {
+				_, err := lockTable(t, db)
+				locked <- err
+				return tt.answer(w)
+			})
+			created := insert(t, queries, "sms", 1)
+			var logs syncBuffer
+
+			runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: 50 * time.Millisecond})
+			select {
+			case err := <-locked:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("timed out waiting for the provider request")
+			}
+			waitFor(t, "the result write gives up", func() bool {
+				return logs.lineWith(`"msg":"write result"`, `"notification_id":"`+created.ID.String()+`"`, `"status":"`+tt.wantStatus+`"`, `"provider_message_id":"`+tt.wantMessageID+`"`, "context deadline exceeded")
+			})
+
+			if keys := fake.keys(); len(keys) != 1 {
+				t.Errorf("provider got %d requests, want 1", len(keys))
+			}
+		})
 	}
 }

@@ -17,12 +17,13 @@ import (
 var priorities = []int16{0, 1, 2}
 
 type Pool struct {
-	Queries  *store.Queries
-	Provider *provider.Client
-	Logger   *slog.Logger
-	Channel  string
-	Size     int32
-	Interval time.Duration
+	Queries      *store.Queries
+	Provider     *provider.Client
+	Logger       *slog.Logger
+	Channel      string
+	Size         int32
+	Interval     time.Duration
+	QueryTimeout time.Duration
 }
 
 func (p Pool) Run(ctx context.Context) {
@@ -58,11 +59,13 @@ func (p Pool) claim(ctx context.Context, jobs chan<- store.Notification, busy *a
 		if free == 0 {
 			return
 		}
-		claimed, err := p.Queries.ClaimNotifications(ctx, store.ClaimNotificationsParams{
+		queryCtx, cancel := context.WithTimeout(ctx, p.QueryTimeout)
+		claimed, err := p.Queries.ClaimNotifications(queryCtx, store.ClaimNotificationsParams{
 			Channel:  p.Channel,
 			Priority: priority,
 			RowLimit: free,
 		})
+		cancel()
 		if err != nil {
 			p.Logger.ErrorContext(ctx, "claim notifications", "channel", p.Channel, "priority", priority, "error", err)
 			return
@@ -81,13 +84,15 @@ func (p Pool) send(ctx context.Context, notification store.Notification) {
 		Channel: notification.Channel,
 		Content: notification.Content,
 	})
+	queryCtx, cancel := context.WithTimeout(ctx, p.QueryTimeout)
+	defer cancel()
 	if err != nil {
 		p.Logger.ErrorContext(ctx, "send notification", "notification_id", notification.ID, "error", err)
-		changed, err := p.Queries.MarkFailed(ctx, notification.ID)
+		changed, err := p.Queries.MarkFailed(queryCtx, notification.ID)
 		p.checkWrite(ctx, notification.ID, "failed", "", changed, err)
 		return
 	}
-	changed, err := p.Queries.MarkSent(ctx, store.MarkSentParams{
+	changed, err := p.Queries.MarkSent(queryCtx, store.MarkSentParams{
 		ID:                notification.ID,
 		ProviderMessageID: pgtype.Text{String: messageID, Valid: messageID != ""},
 	})
