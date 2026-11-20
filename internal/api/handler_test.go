@@ -121,6 +121,9 @@ func TestCreateNotification(t *testing.T) {
 		{"malformed json", `{"recipient":`, http.StatusBadRequest, "request body must be a valid JSON object"},
 		{"body is not an object", `5`, http.StatusBadRequest, "request body must be a valid JSON object"},
 		{"wrong field type", `{"recipient":"+905551234567","channel":"sms","content":5}`, http.StatusBadRequest, `field "content" has the wrong type`},
+		{"unknown field", `{"recipient":"+905551234567","channel":"sms","content":"hello","priorty":"high"}`, http.StatusBadRequest, `field "priorty" is not known`},
+		{"unknown field with a quote in its name", `{"recipient":"+905551234567","channel":"sms","content":"hello","a\"b":1}`, http.StatusBadRequest, `field "a\"b" is not known`},
+		{"unknown field in an invalid notification", `{"recipient":"0555","channel":"sms","content":"hello","priorty":"high"}`, http.StatusBadRequest, `field "priorty" is not known`},
 	}
 	for _, tt := range rejected {
 		t.Run(tt.name, func(t *testing.T) {
@@ -453,6 +456,8 @@ func TestCreateBatch(t *testing.T) {
 
 		wantError(t, postBatch(t, mux, `{"notifications":`), http.StatusBadRequest, "request body must be a valid JSON object")
 		wantError(t, postBatch(t, mux, `{"notifications":[{"recipient":"+905551234567","channel":"sms","content":5}]}`), http.StatusBadRequest, `field "notifications.0.content" has the wrong type`)
+		wantError(t, postBatch(t, mux, batchBody(validSMS, `{"recipient":"+905551234567","channel":"sms","content":"hello","priorty":"high"}`)), http.StatusBadRequest, `field "priorty" is not known`)
+		wantError(t, postBatch(t, mux, `{"notifications":[`+validSMS+`],"dry_run":true}`), http.StatusBadRequest, `field "dry_run" is not known`)
 		wantError(t, postBatch(t, mux, batchBody(validSMS), strings.Repeat("k", 256)), http.StatusBadRequest, "Idempotency-Key must be 1 to 255 bytes long")
 		wantError(t, postBatch(t, mux, batchBody(validSMS), "one", "two"), http.StatusBadRequest, `parameter "Idempotency-Key" must be sent once`)
 		wantInserted(t, before, 0)

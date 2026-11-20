@@ -110,6 +110,11 @@ These are settled. Raise it before changing one.
   100 kB of email content, which JSON escaping can grow to 600 kB. A batch
   body over 10 MB is 413. Reason: that fits 1000 items of about 10 kB each,
   and a batch of larger emails can be sent in parts.
+- A request body with a field the endpoint does not define is 400. Reason:
+  a mistyped name such as `priorty` would otherwise be dropped and the
+  default used. In a batch, one such field rejects the whole batch, like a
+  field of the wrong type. Field names are matched without regard to case,
+  as `encoding/json` does.
 - Batch is partial success. Validate each item, insert all valid items in one
   transaction, answer per index. 202 if at least one is accepted, 422 if none.
   More than 1000 items, or no items, is 422. An accepted item answers with

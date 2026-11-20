@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/oapi-codegen/runtime"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/validate"
@@ -64,6 +65,7 @@ type server struct {
 }
 
 func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
+	runtime.SetJSONCodec(strictJSON{})
 	requestErrorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
 		status, message := requestError(err)
 		writeError(r.Context(), w, logger, status, message)
@@ -512,6 +514,10 @@ func requestError(err error) (int, string) {
 	var wrongType *json.UnmarshalTypeError
 	if errors.As(err, &wrongType) && wrongType.Field != "" {
 		return http.StatusBadRequest, fmt.Sprintf("field %q has the wrong type", wrongType.Field)
+	}
+	var unknownField *unknownFieldError
+	if errors.As(err, &unknownField) {
+		return http.StatusBadRequest, fmt.Sprintf("field %s is not known", unknownField.quotedName)
 	}
 	var tooMany *TooManyValuesForParamError
 	if errors.As(err, &tooMany) {
