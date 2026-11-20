@@ -53,6 +53,7 @@ services:
   api:
     build: .
     command: ["api"]
+    stop_grace_period: 20s
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
       REDIS_URL: redis://redis:6379

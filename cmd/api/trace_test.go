@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -28,7 +29,7 @@ func TestRequestsThroughTheHandlerAreTraced(t *testing.T) {
 }
 
 func TestRunRejectsATraceEndpointThatIsNotAURL(t *testing.T) {
-	err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", "redis://127.0.0.1:1", "jaeger:4318")
+	err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", "redis://127.0.0.1:1", "jaeger:4318", "127.0.0.1:0", time.Second)
 
 	if err == nil || !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_ENDPOINT") {
 		t.Errorf("run = %v, want an error that names OTEL_EXPORTER_OTLP_ENDPOINT", err)

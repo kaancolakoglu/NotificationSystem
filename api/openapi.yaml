@@ -315,8 +315,8 @@ paths:
         arrive out of order. sent, failed and cancelled are final:
         ignore what arrives after one of them. The server closes the
         stream with code 1013 when events may have been missed: when it
-        lost its connection to Redis, or when 256 events wait for the
-        client. A client that reads nothing for 5 s is cut off without a
+        lost its connection to Redis, when 256 events wait for the
+        client, or when the server stops. A client that reads nothing for 5 s is cut off without a
         close code. A handshake that is refused is answered in plain
         text, not with an Error object.
       parameters:
@@ -479,8 +479,8 @@ paths:
         arrive out of order. sent, failed and cancelled are final:
         ignore what arrives after one of them. The server closes the
         stream with code 1013 when events may have been missed: when it
-        lost its connection to Redis, or when 256 events wait for the
-        client. A client that reads nothing for 5 s is cut off without a
+        lost its connection to Redis, when 256 events wait for the
+        client, or when the server stops. A client that reads nothing for 5 s is cut off without a
         close code. A handshake that is refused is answered in plain
         text, not with an Error object.
       parameters:

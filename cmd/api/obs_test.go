@@ -109,7 +109,7 @@ func metricValue(t *testing.T, metrics, series string) float64 {
 
 func TestRunRejectsABadRedisURL(t *testing.T) {
 	for _, redisURL := range []string{"", "http://redis:6379", "redis://redis:port"} {
-		err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", redisURL, "")
+		err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", redisURL, "", "127.0.0.1:0", time.Second)
 
 		if err == nil || !strings.Contains(err.Error(), "REDIS_URL") {
 			t.Errorf("REDIS_URL %q: error = %v, want one about REDIS_URL", redisURL, err)

@@ -298,6 +298,11 @@ low-priority ones waited 54 s at the median, and the last one 105 s.
 it has not started, and lets the sends in flight finish, for at most 30 s.
 Compose gives it 40 s.
 
+**Stopping the API.** On SIGTERM it accepts no new connection and lets
+the requests in flight finish, for at most 10 s. It closes the status
+streams with code 1013, so their clients reconnect and fetch the status.
+Compose gives it 20 s.
+
 ## Decisions and their cost
 
 | Decision | Why | Cost |

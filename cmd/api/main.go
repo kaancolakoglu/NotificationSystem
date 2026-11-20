@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +27,7 @@ import (
 const (
 	addr              = ":8080"
 	serviceName       = "notification-api"
+	shutdownTimeout   = 10 * time.Second
 	traceFlushTimeout = 2 * time.Second
 	readHeaderTimeout = 5 * time.Second
 	readyTimeout      = time.Second
@@ -36,12 +41,16 @@ var channels = []string{"sms", "email", "push"}
 func main() {
 	logger := obs.NewLogger(os.Stdout)
 
-	err := run(context.Background(), logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
-	logger.Error("api server exited", "error", err)
-	os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	if err := run(ctx, logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), addr, shutdownTimeout); err != nil {
+		logger.Error("api server exited", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("api stopped")
 }
 
-func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, otlpEndpoint string) error {
+func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, otlpEndpoint, addr string, timeout time.Duration) error {
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is not set")
 	}
@@ -81,7 +90,49 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, otlpEn
 
 	hub := events.NewHub(redisClient, logger)
 	go hub.Run(ctx)
-	return newServer(pool, redisClient, hub, tracer, logger).ListenAndServe()
+	return serve(ctx, logger, newServer(pool, redisClient, hub, tracer, logger), addr, timeout)
+}
+
+func serve(ctx context.Context, logger *slog.Logger, server *http.Server, addr string, timeout time.Duration) error {
+	var config net.ListenConfig
+	listener, err := config.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	requests, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRequests()
+	server.BaseContext = func(net.Listener) context.Context { return requests }
+	var handlers sync.WaitGroup
+	handler := server.Handler
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.Add(1)
+		defer handlers.Done()
+		handler.ServeHTTP(w, r)
+	})
+	failed := make(chan error, 1)
+	go func() { failed <- server.Serve(listener) }()
+	select {
+	case err := <-failed:
+		return fmt.Errorf("serve on %s: %w", addr, err)
+	case <-ctx.Done():
+	}
+	logger.InfoContext(ctx, "api is stopping, waiting for the requests in flight")
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	if err := server.Shutdown(stopCtx); err != nil {
+		return fmt.Errorf("shut down within %s of the stop signal: %w", timeout, err)
+	}
+	streamsClosed := make(chan struct{})
+	go func() {
+		defer close(streamsClosed)
+		handlers.Wait()
+	}()
+	select {
+	case <-streamsClosed:
+		return nil
+	case <-stopCtx.Done():
+		return fmt.Errorf("status streams still open %s after the stop signal", timeout)
+	}
 }
 
 func parseRedisURL(redisURL string) (*redis.Options, error) {
@@ -95,7 +146,6 @@ func parseRedisURL(redisURL string) (*redis.Options, error) {
 
 func newServer(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, tracer trace.Tracer, logger *slog.Logger) *http.Server {
 	return &http.Server{
-		Addr:              addr,
 		Handler:           newHandler(pool, redisClient, hub, tracer, logger),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),

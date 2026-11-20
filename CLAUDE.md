@@ -374,6 +374,23 @@ These are settled. Raise it before changing one.
   the worker 40 s before it kills it. Reason: the default is 10 s,
   shorter than the deadline. After the deadline a last publish can take
   5 s and the export of the spans 2 s.
+- API shutdown on SIGTERM or SIGINT: stop accepting connections, let
+  the requests in flight finish (deadline 10 s), exit with status 0.
+  Reason: a stop cut them off. A create that was already stored looked
+  failed to its client, and without an `Idempotency-Key` the retry
+  created it twice. A request runs on a context that the signal does
+  not cancel. The status streams are closed at the signal with code
+  1013, like after a failed subscription. Reason: the client has to do
+  the same thing, reconnect and fetch the status. The API waits until
+  every stream has ended. Reason: the span and the request line of a
+  stream are written when it ends. The cost: a client that does not
+  answer the close holds the stop for 5 s. Measured: 5.0 s. The
+  deadline counts from the signal. When it passes, the API cancels what
+  is still running and exits with status 1 and an error line. Compose
+  gives the API 20 s before it kills it. Reason: the default is 10 s.
+  After the deadline, closing the database pool waits for a scrape of
+  `/metrics` that is still running, at most 5 s, and the export of the
+  spans can take 2 s.
 - Compose uses `cmd/fakeprovider` by default. `PROVIDER_URL` switches to a
   webhook.site URL. Reason: free webhook.site URLs stop after 50 to 100
   requests. The README says so. The fake provider answers 202. A
@@ -512,8 +529,8 @@ These are settled. Raise it before changing one.
   or a send never waits for an export. When the worker stops, after its
   pools have returned, it waits at most 2 s to export the spans it still
   holds. Spans not sent by then are lost and an error is logged. The API
-  does not handle a stop signal, so it loses the spans of its last
-  seconds. The OpenTelemetry libraries read other `OTEL_` variables
+  does the same when it stops, after its requests and streams have
+  ended or the deadline has passed. The OpenTelemetry libraries read other `OTEL_` variables
   themselves, such as `OTEL_EXPORTER_OTLP_HEADERS` and the `OTEL_BSP_`
   ones. The span of a status stream
   lasts as long as the stream. In compose the API and the worker do not
@@ -556,8 +573,8 @@ These are settled. Raise it before changing one.
   by another worker at once. `sent`, `failed` and `cancelled` are final,
   so a client ignores what arrives after one of them. The API closes
   a stream with code 1013 when the stream may have missed events: when
-  the Redis subscription failed, and when the stream holds 256 events
-  the client has not read. A write to a client gets 5 s. Then the API
+  the Redis subscription failed, when the stream holds 256 events the
+  client has not read, and when the API stops. A write to a client gets 5 s. Then the API
   drops the connection without a close frame, so a client that stopped
   reading sees code 1006. While the API has no subscription, a new
   stream is refused with 503. After a failed subscription the API waits
