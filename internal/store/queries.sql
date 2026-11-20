@@ -1,6 +1,6 @@
 -- name: InsertNotification :one
-INSERT INTO notifications (id, recipient, channel, content, priority)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO notifications (id, recipient, channel, content, priority, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetNotification :one
@@ -31,8 +31,8 @@ WHERE key = ANY (ARRAY(
 ));
 
 -- name: InsertBatchNotifications :copyfrom
-INSERT INTO notifications (id, recipient, channel, content, priority, batch_id)
-VALUES ($1, $2, $3, $4, $5, $6);
+INSERT INTO notifications (id, recipient, channel, content, priority, batch_id, correlation_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7);
 
 -- name: CountBatchByStatus :one
 SELECT
@@ -130,12 +130,12 @@ WITH swept AS (
     SET status = CASE WHEN attempts >= sqlc.arg('max_attempts')::smallint THEN 'failed' ELSE 'pending' END,
         last_error = sqlc.arg('error')::text
     WHERE status = 'processing' AND locked_until < now()
-    RETURNING id, status, attempts, last_error
+    RETURNING id, channel, status, attempts, last_error, correlation_id
 ), recorded AS (
     INSERT INTO delivery_attempts (notification_id, attempt, error)
     SELECT id, attempts, last_error FROM swept
 )
-SELECT id, status, attempts FROM swept;
+SELECT id, channel, status, attempts, correlation_id FROM swept;
 
 -- name: ListDeliveryAttempts :many
 SELECT attempt, error, created_at FROM delivery_attempts

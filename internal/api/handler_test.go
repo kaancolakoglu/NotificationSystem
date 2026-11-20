@@ -99,6 +99,7 @@ func TestCreateNotification(t *testing.T) {
 				Status:        "pending",
 				CreatedAt:     row.CreatedAt,
 				NextAttemptAt: row.CreatedAt,
+				CorrelationID: pgtype.Text{String: rec.Header().Get("X-Correlation-ID"), Valid: true},
 			}
 			if row != wantRow {
 				t.Errorf("stored row = %+v, want %+v", row, wantRow)
@@ -351,6 +352,7 @@ func TestCreateBatch(t *testing.T) {
 			want.CreatedAt = row.CreatedAt
 			want.NextAttemptAt = row.CreatedAt
 			want.BatchID = pgtype.UUID{Bytes: got.BatchId, Valid: true}
+			want.CorrelationID = pgtype.Text{String: rec.Header().Get("X-Correlation-ID"), Valid: true}
 			if row != want {
 				t.Errorf("result %d: stored row = %+v, want %+v", index, row, want)
 			}

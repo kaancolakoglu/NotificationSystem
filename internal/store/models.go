@@ -40,4 +40,5 @@ type Notification struct {
 	Attempts          int16
 	LastError         pgtype.Text
 	LockedUntil       pgtype.Timestamptz
+	CorrelationID     pgtype.Text
 }

@@ -44,8 +44,8 @@ func TestFailedResponseWriteIsNotAnsweredAgain(t *testing.T) {
 		t.Errorf("statuses written = %v, want %v", w.statuses, want)
 	}
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("logged %d lines, want 1: %s", len(lines), logs.String())
+	if len(lines) != 2 || !strings.Contains(lines[1], `"msg":"request handled"`) {
+		t.Fatalf("logged %d lines, want the failed write and the request: %s", len(lines), logs.String())
 	}
 	for _, want := range []string{`"msg":"write response"`, `"method":"POST"`, `"path":"/v1/notifications"`, `"status":422`, `"error":"connection reset"`} {
 		if !strings.Contains(lines[0], want) {

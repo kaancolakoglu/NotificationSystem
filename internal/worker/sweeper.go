@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 )
 
@@ -46,6 +47,6 @@ func (s Sweeper) sweep(ctx context.Context) {
 		if notification.Status == "failed" {
 			level = slog.LevelError
 		}
-		s.Logger.Log(ctx, level, "lease expired", "notification_id", notification.ID, "attempt", notification.Attempts, "status", notification.Status)
+		s.Logger.Log(obs.WithCorrelationID(ctx, notification.CorrelationID.String), level, "lease expired", "channel", notification.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", notification.Status)
 	}
 }

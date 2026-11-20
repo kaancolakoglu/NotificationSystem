@@ -208,8 +208,17 @@ type Priority string
 // Status defines model for Status.
 type Status string
 
+// CorrelationId defines model for CorrelationId.
+type CorrelationId = string
+
 // IdempotencyKey defines model for IdempotencyKey.
 type IdempotencyKey = string
+
+// GetBatchParams defines parameters for GetBatch.
+type GetBatchParams struct {
+	// XCorrelationID Names the request in the logs. It is 1 to 128 printable ASCII characters without spaces, sent once. Any other value is answered with 400. If it is not sent, or is not valid, the server generates one. Every response carries the id that was used, in the same header. It is stored with each notification the request creates and appears in the log lines of their delivery. A replay with an Idempotency-Key creates nothing, so the notification keeps the id of the first request.
+	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
+}
 
 // ListNotificationsParams defines parameters for ListNotifications.
 type ListNotificationsParams struct {
@@ -228,18 +237,39 @@ type ListNotificationsParams struct {
 
 	// Cursor The next_cursor of the previous page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// XCorrelationID Names the request in the logs. It is 1 to 128 printable ASCII characters without spaces, sent once. Any other value is answered with 400. If it is not sent, or is not valid, the server generates one. Every response carries the id that was used, in the same header. It is stored with each notification the request creates and appears in the log lines of their delivery. A replay with an Idempotency-Key creates nothing, so the notification keeps the id of the first request.
+	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
 }
 
 // CreateNotificationParams defines parameters for CreateNotification.
 type CreateNotificationParams struct {
 	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing. A key is kept for at least 24 hours. Once it is deleted, a request with that key is handled as a new one.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCorrelationID Names the request in the logs. It is 1 to 128 printable ASCII characters without spaces, sent once. Any other value is answered with 400. If it is not sent, or is not valid, the server generates one. Every response carries the id that was used, in the same header. It is stored with each notification the request creates and appears in the log lines of their delivery. A replay with an Idempotency-Key creates nothing, so the notification keeps the id of the first request.
+	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
 }
 
 // CreateBatchParams defines parameters for CreateBatch.
 type CreateBatchParams struct {
 	// IdempotencyKey Makes the request safe to retry. A repeat with the same key and the same body returns the first response and creates nothing. A key is kept for at least 24 hours. Once it is deleted, a request with that key is handled as a new one.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCorrelationID Names the request in the logs. It is 1 to 128 printable ASCII characters without spaces, sent once. Any other value is answered with 400. If it is not sent, or is not valid, the server generates one. Every response carries the id that was used, in the same header. It is stored with each notification the request creates and appears in the log lines of their delivery. A replay with an Idempotency-Key creates nothing, so the notification keeps the id of the first request.
+	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
+}
+
+// GetNotificationParams defines parameters for GetNotification.
+type GetNotificationParams struct {
+	// XCorrelationID Names the request in the logs. It is 1 to 128 printable ASCII characters without spaces, sent once. Any other value is answered with 400. If it is not sent, or is not valid, the server generates one. Every response carries the id that was used, in the same header. It is stored with each notification the request creates and appears in the log lines of their delivery. A replay with an Idempotency-Key creates nothing, so the notification keeps the id of the first request.
+	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
+}
+
+// CancelNotificationParams defines parameters for CancelNotification.
+type CancelNotificationParams struct {
+	// XCorrelationID Names the request in the logs. It is 1 to 128 printable ASCII characters without spaces, sent once. Any other value is answered with 400. If it is not sent, or is not valid, the server generates one. Every response carries the id that was used, in the same header. It is stored with each notification the request creates and appears in the log lines of their delivery. A replay with an Idempotency-Key creates nothing, so the notification keeps the id of the first request.
+	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
 }
 
 // CreateNotificationJSONRequestBody defines body for CreateNotification for application/json ContentType.
@@ -252,7 +282,7 @@ type CreateBatchJSONRequestBody = CreateBatchRequest
 type ServerInterface interface {
 	// GetBatch Get the status counts of a batch
 	// (GET /v1/batches/{id})
-	GetBatch(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
+	GetBatch(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params GetBatchParams)
 	// ListNotifications List notifications, newest first
 	// (GET /v1/notifications)
 	ListNotifications(w http.ResponseWriter, r *http.Request, params ListNotificationsParams)
@@ -264,10 +294,10 @@ type ServerInterface interface {
 	CreateBatch(w http.ResponseWriter, r *http.Request, params CreateBatchParams)
 	// GetNotification Get a notification by id, with its delivery attempts
 	// (GET /v1/notifications/{id})
-	GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
+	GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params GetNotificationParams)
 	// CancelNotification Cancel a pending notification
 	// (POST /v1/notifications/{id}/cancel)
-	CancelNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
+	CancelNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params CancelNotificationParams)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -294,8 +324,32 @@ func (siw *ServerInterfaceWrapper) GetBatch(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetBatchParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Correlation-ID" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Correlation-ID")]; found {
+		var XCorrelationID CorrelationId
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Correlation-ID", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Correlation-ID", valueList[0], &XCorrelationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Correlation-ID", Err: err})
+			return
+		}
+
+		params.XCorrelationID = &XCorrelationID
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetBatch(w, r, id)
+		siw.Handler.GetBatch(w, r, id, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -405,6 +459,27 @@ func (siw *ServerInterfaceWrapper) ListNotifications(w http.ResponseWriter, r *h
 		return
 	}
 
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Correlation-ID" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Correlation-ID")]; found {
+		var XCorrelationID CorrelationId
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Correlation-ID", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Correlation-ID", valueList[0], &XCorrelationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Correlation-ID", Err: err})
+			return
+		}
+
+		params.XCorrelationID = &XCorrelationID
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListNotifications(w, r, params)
 	}))
@@ -443,6 +518,25 @@ func (siw *ServerInterfaceWrapper) CreateNotification(w http.ResponseWriter, r *
 		}
 
 		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-Correlation-ID" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Correlation-ID")]; found {
+		var XCorrelationID CorrelationId
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Correlation-ID", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Correlation-ID", valueList[0], &XCorrelationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Correlation-ID", Err: err})
+			return
+		}
+
+		params.XCorrelationID = &XCorrelationID
 
 	}
 
@@ -487,6 +581,25 @@ func (siw *ServerInterfaceWrapper) CreateBatch(w http.ResponseWriter, r *http.Re
 
 	}
 
+	// ------------- Optional header parameter "X-Correlation-ID" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Correlation-ID")]; found {
+		var XCorrelationID CorrelationId
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Correlation-ID", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Correlation-ID", valueList[0], &XCorrelationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Correlation-ID", Err: err})
+			return
+		}
+
+		params.XCorrelationID = &XCorrelationID
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.CreateBatch(w, r, params)
 	}))
@@ -513,8 +626,32 @@ func (siw *ServerInterfaceWrapper) GetNotification(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetNotificationParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Correlation-ID" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Correlation-ID")]; found {
+		var XCorrelationID CorrelationId
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Correlation-ID", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Correlation-ID", valueList[0], &XCorrelationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Correlation-ID", Err: err})
+			return
+		}
+
+		params.XCorrelationID = &XCorrelationID
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetNotification(w, r, id)
+		siw.Handler.GetNotification(w, r, id, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -539,8 +676,32 @@ func (siw *ServerInterfaceWrapper) CancelNotification(w http.ResponseWriter, r *
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CancelNotificationParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Correlation-ID" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Correlation-ID")]; found {
+		var XCorrelationID CorrelationId
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Correlation-ID", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Correlation-ID", valueList[0], &XCorrelationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Correlation-ID", Err: err})
+			return
+		}
+
+		params.XCorrelationID = &XCorrelationID
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.CancelNotification(w, r, id)
+		siw.Handler.CancelNotification(w, r, id, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -681,7 +842,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 }
 
 type GetBatchRequestObject struct {
-	Id openapi_types.UUID `json:"id"`
+	Id     openapi_types.UUID `json:"id"`
+	Params GetBatchParams
 }
 
 type GetBatchResponseObject interface {
@@ -981,7 +1143,8 @@ func (response CreateBatch500JSONResponse) VisitCreateBatchResponse(w http.Respo
 }
 
 type GetNotificationRequestObject struct {
-	Id openapi_types.UUID `json:"id"`
+	Id     openapi_types.UUID `json:"id"`
+	Params GetNotificationParams
 }
 
 type GetNotificationResponseObject interface {
@@ -1045,7 +1208,8 @@ func (response GetNotification500JSONResponse) VisitGetNotificationResponse(w ht
 }
 
 type CancelNotificationRequestObject struct {
-	Id openapi_types.UUID `json:"id"`
+	Id     openapi_types.UUID `json:"id"`
+	Params CancelNotificationParams
 }
 
 type CancelNotificationResponseObject interface {
@@ -1184,10 +1348,11 @@ type strictHandler struct {
 }
 
 // GetBatch operation middleware
-func (sh *strictHandler) GetBatch(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+func (sh *strictHandler) GetBatch(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params GetBatchParams) {
 	var request GetBatchRequestObject
 
 	request.Id = id
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.GetBatch(ctx, request.(GetBatchRequestObject))
@@ -1302,10 +1467,11 @@ func (sh *strictHandler) CreateBatch(w http.ResponseWriter, r *http.Request, par
 }
 
 // GetNotification operation middleware
-func (sh *strictHandler) GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+func (sh *strictHandler) GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params GetNotificationParams) {
 	var request GetNotificationRequestObject
 
 	request.Id = id
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.GetNotification(ctx, request.(GetNotificationRequestObject))
@@ -1328,10 +1494,11 @@ func (sh *strictHandler) GetNotification(w http.ResponseWriter, r *http.Request,
 }
 
 // CancelNotification operation middleware
-func (sh *strictHandler) CancelNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+func (sh *strictHandler) CancelNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params CancelNotificationParams) {
 	var request CancelNotificationRequestObject
 
 	request.Id = id
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.CancelNotification(ctx, request.(CancelNotificationRequestObject))

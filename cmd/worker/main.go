@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
 	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
@@ -38,7 +39,13 @@ const (
 var channels = []string{"sms", "email", "push"}
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := obs.NewLogger(os.Stdout)
+	hostname, err := os.Hostname()
+	if err != nil {
+		logger.Error("worker exited", "error", fmt.Errorf("read host name: %w", err))
+		os.Exit(1)
+	}
+	logger = logger.With("worker", hostname)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -60,6 +67,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 	if err != nil {
 		return fmt.Errorf("REDIS_URL is not a Redis URL: %w", err)
 	}
+	redis.SetLogger(obs.RedisLogger{Logger: logger})
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {

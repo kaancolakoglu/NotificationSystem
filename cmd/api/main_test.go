@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	spec "github.com/kaancolakoglu/NotificationSystem/api"
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 )
 
 func TestHealthz(t *testing.T) {
@@ -36,6 +37,41 @@ func TestOpenAPISpec(t *testing.T) {
 	}
 	if !bytes.Equal(rec.Body.Bytes(), spec.Spec) {
 		t.Error("body is not the embedded spec")
+	}
+}
+
+func TestOnlyV1RequestsAreLoggedAndGetACorrelationID(t *testing.T) {
+	tests := []struct {
+		target     string
+		wantStatus int
+		wantLogged bool
+	}{
+		{target: "/v1/notifications?limit=0", wantStatus: http.StatusBadRequest, wantLogged: true},
+		{target: "/healthz", wantStatus: http.StatusOK},
+		{target: "/openapi.yaml", wantStatus: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			var logs bytes.Buffer
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, tt.target, nil)
+
+			newHandler(nil, obs.NewLogger(&logs)).ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d, body %s", rec.Code, tt.wantStatus, rec.Body)
+			}
+			id := rec.Header().Get("X-Correlation-ID")
+			if (id != "") != tt.wantLogged {
+				t.Errorf("X-Correlation-ID of the response = %q, want one = %t", id, tt.wantLogged)
+			}
+			if tt.wantLogged && (!strings.Contains(logs.String(), `"msg":"request handled"`) || !strings.Contains(logs.String(), `"correlation_id":"`+id+`"`)) {
+				t.Errorf("logs = %q, want a request line with the correlation id %q", logs.String(), id)
+			}
+			if !tt.wantLogged && logs.Len() > 0 {
+				t.Errorf("logs = %q, want none", logs.String())
+			}
+		})
 	}
 }
 

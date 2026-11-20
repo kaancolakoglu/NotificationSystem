@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
 	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
@@ -674,7 +675,7 @@ func TestResultForARowThatIsNotProcessingIsLogged(t *testing.T) {
 	if status := get(t, queries, pending.ID).Status; status != "pending" {
 		t.Errorf("status = %q, want %q", status, "pending")
 	}
-	for _, want := range []string{`"level":"ERROR"`, `"msg":"result not written, this attempt no longer holds the notification"`, `"notification_id":"` + pending.ID.String() + `"`, `"attempt":0`, `"status":"sent"`, `"provider_message_id":"message-1"`} {
+	for _, want := range []string{`"level":"ERROR"`, `"msg":"result not written, this attempt no longer holds the notification"`, `"channel":"sms"`, `"notification_id":"` + pending.ID.String() + `"`, `"attempt":0`, `"status":"sent"`, `"provider_message_id":"message-1"`} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("logs = %s, want them to contain %s", logs.String(), want)
 		}
@@ -740,7 +741,7 @@ func TestResultWriteGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 				t.Fatal("timed out waiting for the provider request")
 			}
 			waitFor(t, "the result write gives up", func() bool {
-				return logs.lineWith(`"msg":"write result"`, `"notification_id":"`+created.ID.String()+`"`, `"attempt":1`, `"status":"`+tt.wantStatus+`"`, `"provider_message_id":"`+tt.wantMessageID+`"`, "context deadline exceeded")
+				return logs.lineWith(`"msg":"write result"`, `"channel":"sms"`, `"notification_id":"`+created.ID.String()+`"`, `"attempt":1`, `"status":"`+tt.wantStatus+`"`, `"provider_message_id":"`+tt.wantMessageID+`"`, "context deadline exceeded")
 			})
 
 			if keys := fake.keys(); len(keys) != 1 {
@@ -756,6 +757,7 @@ func TestExpiredLeaseIsSentAgain(t *testing.T) {
 	fake, client := newProvider(t, accept)
 	lost := insert(t, queries, "sms", 1)
 	hold(t, db, lost.ID, 1, "-1 second")
+	setCorrelationID(t, db, lost.ID)
 	held := insert(t, queries, "sms", 1)
 	hold(t, db, held.ID, 1, "1 minute")
 	due := insert(t, queries, "sms", 1)
@@ -766,7 +768,7 @@ func TestExpiredLeaseIsSentAgain(t *testing.T) {
 	if keys, want := fake.keys(), []string{due.ID.String()}; !slices.Equal(keys, want) {
 		t.Fatalf("provider got requests for %v before the sweeper ran, want only %v", keys, want)
 	}
-	runSweeper(t, Sweeper{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout})
+	runSweeper(t, Sweeper{Queries: queries, Logger: obs.NewLogger(&logs), Interval: pollInterval, QueryTimeout: queryTimeout})
 	waitFor(t, "the notification with the expired lease is sent", func() bool { return get(t, queries, lost.ID).Status == "sent" })
 	time.Sleep(10 * pollInterval)
 
@@ -780,8 +782,8 @@ func TestExpiredLeaseIsSentAgain(t *testing.T) {
 	if len(history) != 2 || history[0].Attempt != 1 || history[0].Error.String != leaseExpired || history[1].Attempt != 2 || history[1].Error.Valid {
 		t.Errorf("delivery attempts = %+v, want number 1 with the error %q, then number 2 with none", history, leaseExpired)
 	}
-	if !logs.lineWith(`"level":"WARN"`, `"msg":"lease expired"`, `"notification_id":"`+lost.ID.String()+`"`, `"attempt":1`, `"status":"pending"`) {
-		t.Error("logs have no lease expired line for the notification")
+	if !logs.lineWith(`"level":"WARN"`, `"msg":"lease expired"`, `"channel":"sms"`, `"notification_id":"`+lost.ID.String()+`"`, `"attempt":1`, `"status":"pending"`, hasCorrelationID) {
+		t.Error("logs have no lease expired line for the notification with its channel and correlation id")
 	}
 	if stored := get(t, queries, held.ID); stored.Status != "processing" || stored.Attempts != 1 {
 		t.Errorf("notification with a lease still running: status = %q, attempts = %d, want processing and 1", stored.Status, stored.Attempts)
@@ -810,7 +812,7 @@ func TestExpiredLeaseWithAttemptsUsedUpFails(t *testing.T) {
 	if history := attempts(t, queries, lost.ID); len(history) != 1 || history[0].Attempt != maxAttempts || history[0].Error.String != leaseExpired {
 		t.Errorf("delivery attempts = %+v, want one, number %d with the error %q", history, maxAttempts, leaseExpired)
 	}
-	if !logs.lineWith(`"level":"ERROR"`, `"msg":"lease expired"`, `"notification_id":"`+lost.ID.String()+`"`, `"attempt":5`, `"status":"failed"`) {
+	if !logs.lineWith(`"level":"ERROR"`, `"msg":"lease expired"`, `"channel":"sms"`, `"notification_id":"`+lost.ID.String()+`"`, `"attempt":5`, `"status":"failed"`) {
 		t.Error("logs have no lease expired line for the notification")
 	}
 }
@@ -870,7 +872,7 @@ func TestStaleResultWriteChangesNothing(t *testing.T) {
 			if history := attempts(t, queries, created.ID); len(history) != 1 || history[0].Error.String != leaseExpired {
 				t.Errorf("delivery attempts = %+v, want only the expired one", history)
 			}
-			for _, want := range []string{`"msg":"result not written, this attempt no longer holds the notification"`, `"notification_id":"` + created.ID.String() + `"`, `"attempt":1`, `"status":"` + tt.wantStatus + `"`} {
+			for _, want := range []string{`"msg":"result not written, this attempt no longer holds the notification"`, `"channel":"sms"`, `"notification_id":"` + created.ID.String() + `"`, `"attempt":1`, `"status":"` + tt.wantStatus + `"`} {
 				if !strings.Contains(logs.String(), want) {
 					t.Errorf("logs = %s, want them to contain %s", logs.String(), want)
 				}

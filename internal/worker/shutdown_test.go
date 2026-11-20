@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
@@ -69,12 +70,12 @@ func TestShutdownReleasesANotificationThatWaitsForItsToken(t *testing.T) {
 	queries := store.New(db)
 	fake, client := newProvider(t, accept)
 	for range rows {
-		insert(t, queries, "sms", 1)
+		setCorrelationID(t, db, insert(t, queries, "sms", 1).ID)
 	}
 	var logs syncBuffer
 	oneCallEverySecond := ratelimit.New(testredis.New(t), 1, 1)
 
-	stop, stopped := runPool(t, Pool{Queries: queries, Provider: client, Limiter: oneCallEverySecond, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: rows, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Minute, ShutdownTimeout: time.Minute})
+	stop, stopped := runPool(t, Pool{Queries: queries, Provider: client, Limiter: oneCallEverySecond, Logger: obs.NewLogger(&logs), Channel: "sms", Size: rows, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Minute, ShutdownTimeout: time.Minute})
 	waitFor(t, "one notification is sent and another waits for its token", func() bool {
 		return countByStatus(t, db, "sent") > 0 && countByStatus(t, db, "processing") > 0
 	})
@@ -89,8 +90,8 @@ func TestShutdownReleasesANotificationThatWaitsForItsToken(t *testing.T) {
 	if calls := len(fake.keys()); calls != sent {
 		t.Errorf("provider got %d requests, want %d", calls, sent)
 	}
-	if lines := logs.linesWith(`"level":"INFO"`, releasedAtStop, `"channel":"sms"`); lines < pending || lines > 2*pending {
-		t.Errorf("logs have %d lines for a notification released at the stop, want %d, or up to twice that when a claim in progress at the stop took a released one again", lines, pending)
+	if lines := logs.linesWith(`"level":"INFO"`, releasedAtStop, `"channel":"sms"`, hasCorrelationID); lines < pending || lines > 2*pending {
+		t.Errorf("logs have %d lines with the correlation id for a notification released at the stop, want %d, or up to twice that when a claim in progress at the stop took a released one again", lines, pending)
 	}
 	if logs.lineWith(`"level":"ERROR"`) {
 		t.Error("logs have an error line, want none: a stop is not a failed rate limiter")

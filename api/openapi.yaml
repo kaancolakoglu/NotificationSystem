@@ -4,6 +4,8 @@ info:
   version: 1.0.0
 paths:
   /v1/notifications:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
     get:
       operationId: listNotifications
       summary: List notifications, newest first
@@ -70,7 +72,8 @@ paths:
             not valid or is sent more than once: an unknown status or channel, a created_from or created_to that is not a
             time, a created_from that is not before created_to, a batch_id
             that is not a UUID, a limit outside 1 to 200, or a cursor that
-            is not valid.
+            is not valid. An X-Correlation-ID that is not valid is rejected
+            too.
           content:
             application/json:
               schema:
@@ -104,7 +107,8 @@ paths:
             The request body is not a valid JSON object, has a field that
             is not known or is of the wrong type, or the Idempotency-Key is
             sent more than once or is not 1 to 255 bytes long. A query
-            parameter is rejected too.
+            parameter and an X-Correlation-ID that is not valid are rejected
+            too.
           content:
             application/json:
               schema:
@@ -134,6 +138,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
   /v1/notifications/batch:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
     post:
       operationId: createBatch
       summary: Create up to 1000 notifications
@@ -162,7 +168,8 @@ paths:
             is not known or is of the wrong type, or the Idempotency-Key is
             sent more than once or is not 1 to 255 bytes long. Such a field
             in one notification rejects the whole batch. A query parameter
-            is rejected too. Nothing was created.
+            and an X-Correlation-ID that is not valid are rejected too.
+            Nothing was created.
           content:
             application/json:
               schema:
@@ -194,6 +201,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
   /v1/notifications/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
     get:
       operationId: getNotification
       summary: Get a notification by id, with its delivery attempts
@@ -212,7 +221,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotificationDetail"
         "400":
-          description: The id is not a UUID, or a query parameter was sent.
+          description: >-
+            The id is not a UUID, a query parameter was sent, or the
+            X-Correlation-ID is not valid.
           content:
             application/json:
               schema:
@@ -230,6 +241,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
   /v1/notifications/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
     post:
       operationId: cancelNotification
       summary: Cancel a pending notification
@@ -252,7 +265,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Notification"
         "400":
-          description: The id is not a UUID, or a query parameter was sent.
+          description: >-
+            The id is not a UUID, a query parameter was sent, or the
+            X-Correlation-ID is not valid.
           content:
             application/json:
               schema:
@@ -278,6 +293,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
   /v1/batches/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
     get:
       operationId: getBatch
       summary: Get the status counts of a batch
@@ -296,7 +313,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Batch"
         "400":
-          description: The id is not a UUID, or a query parameter was sent.
+          description: >-
+            The id is not a UUID, a query parameter was sent, or the
+            X-Correlation-ID is not valid.
           content:
             application/json:
               schema:
@@ -315,6 +334,23 @@ paths:
                 $ref: "#/components/schemas/Error"
 components:
   parameters:
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      description: >-
+        Names the request in the logs. It is 1 to 128 printable ASCII
+        characters without spaces, sent once. Any other value is answered
+        with 400. If it is not sent, or is not valid, the server generates
+        one. Every response carries the id that was used, in the same
+        header. It is stored with each notification the request creates
+        and appears in the log lines of their delivery. A replay with an
+        Idempotency-Key creates nothing, so the notification keeps the id
+        of the first request.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[!-~]+$"
     IdempotencyKey:
       name: Idempotency-Key
       in: header

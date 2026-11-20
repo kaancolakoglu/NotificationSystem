@@ -234,7 +234,7 @@ func TestStaleReleaseChangesNothing(t *testing.T) {
 	if stored := get(t, queries, created.ID); stored != current {
 		t.Errorf("row after the stale release = %+v, want it unchanged %+v", stored, current)
 	}
-	if !logs.lineWith(`"msg":"result not written, this attempt no longer holds the notification"`, `"notification_id":"`+created.ID.String()+`"`, `"attempt":1`, `"status":"pending"`) {
+	if !logs.lineWith(`"msg":"result not written, this attempt no longer holds the notification"`, `"channel":"sms"`, `"notification_id":"`+created.ID.String()+`"`, `"attempt":1`, `"status":"pending"`) {
 		t.Error("logs have no line for the release that was not written")
 	}
 

@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oapi-codegen/runtime"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/validate"
 )
@@ -42,13 +43,19 @@ const (
 	maxIdempotencyKeyBytes = 255
 	maxBatchSize           = 1000
 
+	correlationIDHeader   = "X-Correlation-ID"
+	maxCorrelationIDBytes = 128
+
 	defaultPageSize int32 = 50
 	maxPageSize     int32 = 200
 
 	idempotencyKeyConflictMessage = "Idempotency-Key was already used with a different request body"
 )
 
-var idempotencyKeyLengthMessage = fmt.Sprintf("Idempotency-Key must be 1 to %d bytes long", maxIdempotencyKeyBytes)
+var (
+	idempotencyKeyLengthMessage = fmt.Sprintf("Idempotency-Key must be 1 to %d bytes long", maxIdempotencyKeyBytes)
+	correlationIDMessage        = fmt.Sprintf("%s must be sent once and be 1 to %d printable ASCII characters without spaces", correlationIDHeader, maxCorrelationIDBytes)
+)
 
 var queryParameters = map[string][]string{
 	"GET /v1/notifications": {"status", "channel", "created_from", "created_to", "batch_id", "limit", "cursor"},
@@ -81,11 +88,13 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
 			writeError(r.Context(), w, logger, http.StatusInternalServerError, "internal error")
 		},
 	})
+	v1 := http.NewServeMux()
 	HandlerWithOptions(handler, StdHTTPServerOptions{
-		BaseRouter:       mux,
+		BaseRouter:       v1,
 		ErrorHandlerFunc: requestErrorHandler,
-		Middlewares:      []MiddlewareFunc{checkQueryParameters(logger), trackResponseStart},
+		Middlewares:      []MiddlewareFunc{checkQueryParameters(logger)},
 	})
+	mux.Handle("/v1/", correlate(logger, v1))
 }
 
 type startedResponse struct {
@@ -98,10 +107,47 @@ func (w *startedResponse) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
-func trackResponseStart(next http.Handler) http.Handler {
+func correlate(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(&startedResponse{ResponseWriter: w}, r)
+		started := time.Now()
+		response := &startedResponse{ResponseWriter: w}
+		sent := r.Header.Values(correlationIDHeader)
+		valid := len(sent) == 1 && validCorrelationID(sent[0])
+		var id string
+		if valid {
+			id = sent[0]
+		} else {
+			generated, err := uuid.NewV7()
+			if err != nil {
+				logger.ErrorContext(r.Context(), "generate correlation id", "method", r.Method, "path", r.URL.Path, "error", err)
+				writeError(r.Context(), response, logger, http.StatusInternalServerError, "internal error")
+				return
+			}
+			id = generated.String()
+		}
+		ctx := obs.WithCorrelationID(r.Context(), id)
+		response.Header().Set(correlationIDHeader, id)
+		defer func() {
+			logger.InfoContext(ctx, "request handled", "method", r.Method, "path", r.URL.Path, "status", response.status, "duration_seconds", time.Since(started).Seconds())
+		}()
+		if len(sent) > 0 && !valid {
+			writeError(ctx, response, logger, http.StatusBadRequest, correlationIDMessage)
+			return
+		}
+		next.ServeHTTP(response, r.WithContext(ctx))
 	})
+}
+
+func validCorrelationID(id string) bool {
+	if id == "" || len(id) > maxCorrelationIDBytes {
+		return false
+	}
+	for _, char := range []byte(id) {
+		if char < '!' || char > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 func checkQueryParameters(logger *slog.Logger) MiddlewareFunc {
@@ -147,11 +193,12 @@ func (s *server) CreateNotification(ctx context.Context, request CreateNotificat
 	}
 	notification, err := createOnce(ctx, s, key, body, func(queries *store.Queries) (Notification, error) {
 		row, err := queries.InsertNotification(ctx, store.InsertNotificationParams{
-			ID:        id,
-			Recipient: body.Recipient,
-			Channel:   string(body.Channel),
-			Content:   body.Content,
-			Priority:  priorityValue,
+			ID:            id,
+			Recipient:     body.Recipient,
+			Channel:       string(body.Channel),
+			Content:       body.Content,
+			Priority:      priorityValue,
+			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
 		})
 		if err != nil {
 			return Notification{}, fmt.Errorf("insert notification: %w", err)
@@ -196,12 +243,13 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 		}
 		results[i].Id = &id
 		inserts = append(inserts, store.InsertBatchNotificationsParams{
-			ID:        id,
-			Recipient: item.Recipient,
-			Channel:   string(item.Channel),
-			Content:   item.Content,
-			Priority:  priorityValue,
-			BatchID:   pgtype.UUID{Bytes: batchID, Valid: true},
+			ID:            id,
+			Recipient:     item.Recipient,
+			Channel:       string(item.Channel),
+			Content:       item.Content,
+			Priority:      priorityValue,
+			BatchID:       pgtype.UUID{Bytes: batchID, Valid: true},
+			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
 		})
 	}
 	if len(inserts) == 0 {

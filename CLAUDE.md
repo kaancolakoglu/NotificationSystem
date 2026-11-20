@@ -309,6 +309,38 @@ These are settled. Raise it before changing one.
   carries `Retry-After: 1`. The worker exits at start if `PROVIDER_URL`
   is not an http or https URL. Reason: otherwise every notification would
   fail one by one.
+- Correlation id: every `/v1` request has one. The API takes it from
+  `X-Correlation-ID`, or generates a UUIDv7 if the header is not sent. A
+  sent id is 1 to 128 printable ASCII characters without spaces, sent
+  once, else 400. Reason: it is stored as Postgres text and returned in a
+  header, and a caller that sends an id expects to find that id in the
+  logs. That 400 carries a generated id. Every `/v1` response carries the
+  id in the same header, also a 400, 404 or 405 answered before a handler
+  runs. The one exception is the router's redirect for a path that is not
+  clean, such as `/v1//notifications`. The id is stored on each
+  notification the request creates, in `correlation_id`, so a batch
+  shares one. The column is null for rows from before it existed. A
+  replay with an `Idempotency-Key` creates nothing, so the row keeps the
+  id of the first request, and the replay's answer carries the replay's
+  own id. The API does not return the id in a body.
+- Logs: the logger adds `correlation_id` to a line when the context
+  carries one. In the API that is the request. In the worker it is the
+  notification being sent, released or swept, so the lines of a delivery
+  carry the id of the request that created it, the provider client's
+  lines included. A row with a null id is logged without one. The API
+  logs one line per `/v1` request: method, path, status and duration.
+  Routes outside `/v1` are not logged and get no id. Reason: compose
+  calls `/healthz` every 2 s. Every worker line has `worker`, the host
+  name. Reason: with several workers the lines of one can be told apart.
+  A failed send logs what happens next: `status` `pending` with
+  `delay_seconds` at warn level, or `status` `failed` at error level.
+  The line is written before the result is stored. If that write fails,
+  a `write result` or `result not written` line follows. The sweeper
+  logs an expired lease the same way: warn for `pending`, error for
+  `failed`. A notification sent without a problem is not logged. Reason:
+  at 300 per second that is 26 million lines a day, and a count belongs
+  in metrics. go-redis's own messages are written as JSON lines at warn
+  level. Reason: it printed plain text to stderr.
 
 ## Design reference
 

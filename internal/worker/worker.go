@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/sony/gobreaker/v2"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
 	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
@@ -59,14 +60,15 @@ func (p Pool) Run(ctx context.Context) {
 	for range p.Size {
 		senders.Go(func() {
 			for notification := range jobs {
+				notificationCtx := obs.WithCorrelationID(work, notification.CorrelationID.String)
 				switch err := p.Limiter.Wait(ctx, p.Channel); {
 				case err == nil:
-					p.send(work, breaker, notification)
+					p.send(notificationCtx, breaker, notification)
 				case errors.Is(err, context.Canceled):
-					p.release(work, notification, slog.LevelInfo, "worker is stopping, releasing the notification", err)
+					p.release(notificationCtx, notification, slog.LevelInfo, "worker is stopping, releasing the notification", err)
 				default:
 					limiterDown.Store(true)
-					p.release(work, notification, slog.LevelError, "rate limiter failed, releasing the notification", err)
+					p.release(notificationCtx, notification, slog.LevelError, "rate limiter failed, releasing the notification", err)
 				}
 				busy.Add(-1)
 			}
@@ -187,14 +189,15 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 		return
 	}
 
-	p.Logger.ErrorContext(ctx, "send notification", "notification_id", notification.ID, "attempt", notification.Attempts, "error", sendErr)
 	var failure *provider.Error
 	if !errors.As(sendErr, &failure) || !failure.Retryable || notification.Attempts >= maxAttempts {
+		p.Logger.ErrorContext(ctx, "send notification", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", "failed", "error", sendErr)
 		changed, err := p.Queries.MarkFailed(queryCtx, store.MarkFailedParams{ID: notification.ID, Attempts: notification.Attempts, Error: sendErr.Error()})
 		p.checkWrite(ctx, notification, "failed", "", changed, err)
 		return
 	}
 	delay := retryDelay(p.BackoffBase, notification.Attempts, failure.RetryAfter)
+	p.Logger.WarnContext(ctx, "send notification", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", "pending", "delay_seconds", delay.Seconds(), "error", sendErr)
 	changed, err := p.Queries.ScheduleRetry(queryCtx, store.ScheduleRetryParams{
 		ID:       notification.ID,
 		Attempts: notification.Attempts,
@@ -210,10 +213,10 @@ func retryDelay(base time.Duration, attempts int16, retryAfter time.Duration) ti
 
 func (p Pool) checkWrite(ctx context.Context, notification store.Notification, status, messageID string, changed int64, err error) {
 	if err != nil {
-		p.Logger.ErrorContext(ctx, "write result", "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID, "error", err)
+		p.Logger.ErrorContext(ctx, "write result", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID, "error", err)
 		return
 	}
 	if changed == 0 {
-		p.Logger.ErrorContext(ctx, "result not written, this attempt no longer holds the notification", "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID)
+		p.Logger.ErrorContext(ctx, "result not written, this attempt no longer holds the notification", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID)
 	}
 }

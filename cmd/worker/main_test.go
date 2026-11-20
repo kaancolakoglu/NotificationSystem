@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,7 +16,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
 	"github.com/kaancolakoglu/NotificationSystem/internal/testredis"
@@ -264,6 +268,72 @@ func TestRunRetriesFailedSendsAfterTheBackoff(t *testing.T) {
 	}
 	if longest < time.Second {
 		t.Errorf("longest of %d retry delays after the first attempt = %s, want some above 1 s", rows, longest)
+	}
+}
+
+type syncBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+func TestRunLogsJSONLinesWithTheWorkerAndTheCorrelationID(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	if _, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{ID: uuid.Must(uuid.NewV7()), Recipient: "+905551234567", Channel: "sms", Content: "hello", Priority: 1, CorrelationID: pgtype.Text{String: "order-42", Valid: true}}); err != nil {
+		t.Fatalf("insert notification: %v", err)
+	}
+	var logs syncBuffer
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- run(ctx, obs.NewLogger(&logs).With("worker", "worker-1"), db.Config().ConnString(), "redis://127.0.0.1:1", "http://127.0.0.1:1/", 5*time.Second)
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for !strings.Contains(logs.String(), `"msg":"rate limiter failed, releasing the notification"`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("logs = %s, want a line for the notification released because Redis is down", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-stopped; err != nil {
+		t.Errorf("run returned %v after it was told to stop, want no error", err)
+	}
+
+	released, fromRedis := false, false
+	for line := range strings.Lines(logs.String()) {
+		var decoded struct {
+			Msg           string `json:"msg"`
+			Worker        string `json:"worker"`
+			CorrelationID string `json:"correlation_id"`
+		}
+		if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+			t.Fatalf("log line %s is not JSON: %v", line, err)
+		}
+		if decoded.Worker != "worker-1" {
+			t.Errorf("log line %s has the worker %q, want the one of the logger that run was given, %q", line, decoded.Worker, "worker-1")
+		}
+		released = released || (decoded.Msg == "rate limiter failed, releasing the notification" && decoded.CorrelationID == "order-42")
+		fromRedis = fromRedis || decoded.Msg == "redis client"
+	}
+	if !released {
+		t.Error("logs have no line with the correlation id for the released notification")
+	}
+	if !fromRedis {
+		t.Error("logs have no line from the Redis client, want its own messages as JSON lines")
 	}
 }
 

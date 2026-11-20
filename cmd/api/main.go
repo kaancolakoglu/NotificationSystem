@@ -13,6 +13,7 @@ import (
 
 	spec "github.com/kaancolakoglu/NotificationSystem/api"
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
+	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := obs.NewLogger(os.Stdout)
 
 	err := run(context.Background(), logger, os.Getenv("DATABASE_URL"))
 	logger.Error("api server exited", "error", err)

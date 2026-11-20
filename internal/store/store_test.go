@@ -401,15 +401,17 @@ func TestSweepExpiredLeases(t *testing.T) {
 	pool := testdb.New(t)
 	queries := store.New(pool)
 	ctx := t.Context()
+	correlationID := pgtype.Text{String: "request-1", Valid: true}
 
 	insert := func(status string, attempts int16, lease string) store.Notification {
 		t.Helper()
 		row, err := queries.InsertNotification(ctx, store.InsertNotificationParams{
-			ID:        uuid.Must(uuid.NewV7()),
-			Recipient: "+905551234567",
-			Channel:   "sms",
-			Content:   "hello",
-			Priority:  1,
+			ID:            uuid.Must(uuid.NewV7()),
+			Recipient:     "+905551234567",
+			Channel:       "sms",
+			Content:       "hello",
+			Priority:      1,
+			CorrelationID: correlationID,
 		})
 		if err != nil {
 			t.Fatalf("insert: %v", err)
@@ -439,9 +441,9 @@ func TestSweepExpiredLeases(t *testing.T) {
 		got[row.ID] = row
 	}
 	want := map[uuid.UUID]store.SweepExpiredLeasesRow{
-		expired.ID: {ID: expired.ID, Status: "pending", Attempts: 1},
-		lastTry.ID: {ID: lastTry.ID, Status: "pending", Attempts: 4},
-		usedUp.ID:  {ID: usedUp.ID, Status: "failed", Attempts: 5},
+		expired.ID: {ID: expired.ID, Channel: "sms", Status: "pending", Attempts: 1, CorrelationID: correlationID},
+		lastTry.ID: {ID: lastTry.ID, Channel: "sms", Status: "pending", Attempts: 4, CorrelationID: correlationID},
+		usedUp.ID:  {ID: usedUp.ID, Channel: "sms", Status: "failed", Attempts: 5, CorrelationID: correlationID},
 	}
 	if len(swept) != len(want) || !maps.Equal(got, want) {
 		t.Errorf("swept = %+v, want %+v", swept, want)
