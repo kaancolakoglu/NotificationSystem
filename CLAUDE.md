@@ -157,6 +157,10 @@ These are settled. Raise it before changing one.
   301, 302 or 303 with a GET that has no body, and a 202 to that GET would
   count as sent. For 429, wait the larger of `Retry-After` and the backoff.
   `Retry-After` is read as seconds or as an HTTP date, and only on a 429.
+  It counts for at most 60 s. Reason: the header could ask for years, and
+  the notification would sit `pending` all that time. The cost: a provider
+  that asks for longer is tried again after 60 s, and that try uses up an
+  attempt.
 - Backoff is full jitter: `random(0, 1s * 2^attempts)`, where `attempts` is
   the row's value after the failed send, so 1 after the first try. Maximum
   5 attempts, so the ceilings are 2, 4, 8 and 16 s.

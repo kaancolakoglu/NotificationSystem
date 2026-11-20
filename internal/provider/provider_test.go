@@ -113,8 +113,11 @@ func TestSendClassifiesAnswers(t *testing.T) {
 		{name: "429 with Retry-After of zero", status: http.StatusTooManyRequests, retryAfter: "0", wantRetryable: true},
 		{name: "429 with negative Retry-After", status: http.StatusTooManyRequests, retryAfter: "-7", wantRetryable: true},
 		{name: "429 with Retry-After that is not a number or a date", status: http.StatusTooManyRequests, retryAfter: "soon", wantRetryable: true},
-		{name: "429 with the largest Retry-After", status: http.StatusTooManyRequests, retryAfter: "2147483647", wantRetryable: true, wantRetryAfter: 2147483647 * time.Second},
-		{name: "429 with Retry-After over the largest", status: http.StatusTooManyRequests, retryAfter: "2147483648", wantRetryable: true},
+		{name: "429 with Retry-After just under the ceiling", status: http.StatusTooManyRequests, retryAfter: "59", wantRetryable: true, wantRetryAfter: 59 * time.Second},
+		{name: "429 with Retry-After at the ceiling", status: http.StatusTooManyRequests, retryAfter: "60", wantRetryable: true, wantRetryAfter: time.Minute},
+		{name: "429 with Retry-After over the ceiling", status: http.StatusTooManyRequests, retryAfter: "61", wantRetryable: true, wantRetryAfter: time.Minute},
+		{name: "429 with Retry-After of 68 years", status: http.StatusTooManyRequests, retryAfter: "2147483648", wantRetryable: true, wantRetryAfter: time.Minute},
+		{name: "429 with Retry-After too large for 64 bits", status: http.StatusTooManyRequests, retryAfter: "99999999999999999999999", wantRetryable: true, wantRetryAfter: time.Minute},
 		{name: "429 with Retry-After date in the past", status: http.StatusTooManyRequests, retryAfter: "Thu, 01 Jan 2026 00:00:00 GMT", wantRetryable: true},
 		{name: "400 is permanent", status: http.StatusBadRequest},
 		{name: "404 is permanent", status: http.StatusNotFound},
@@ -147,18 +150,31 @@ func TestSendClassifiesAnswers(t *testing.T) {
 }
 
 func TestSendReadsRetryAfterDate(t *testing.T) {
-	client, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Retry-After", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat))
-		w.WriteHeader(http.StatusTooManyRequests)
-	})
-
-	err := sendError(t, client)
-
-	if !err.Retryable {
-		t.Error("retryable = false, want true")
+	tests := []struct {
+		name    string
+		ahead   time.Duration
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{name: "under the ceiling", ahead: 30 * time.Second, wantMin: 28 * time.Second, wantMax: 30 * time.Second},
+		{name: "over the ceiling", ahead: time.Hour, wantMin: time.Minute, wantMax: time.Minute},
 	}
-	if err.RetryAfter <= 59*time.Minute || err.RetryAfter > time.Hour {
-		t.Errorf("retry after = %s, want just under 1h", err.RetryAfter)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", time.Now().Add(tt.ahead).UTC().Format(http.TimeFormat))
+				w.WriteHeader(http.StatusTooManyRequests)
+			})
+
+			err := sendError(t, client)
+
+			if !err.Retryable {
+				t.Error("retryable = false, want true")
+			}
+			if err.RetryAfter < tt.wantMin || err.RetryAfter > tt.wantMax {
+				t.Errorf("retry after = %s, want %s to %s", err.RetryAfter, tt.wantMin, tt.wantMax)
+			}
+		})
 	}
 }
 

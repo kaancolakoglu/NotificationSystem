@@ -14,7 +14,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const timeout = 5 * time.Second
+const (
+	timeout       = 5 * time.Second
+	maxRetryAfter = 60 * time.Second
+)
 
 type Message struct {
 	To      string `json:"to"`
@@ -111,11 +114,12 @@ func statusError(response *http.Response) *Error {
 
 func retryAfter(header http.Header) time.Duration {
 	value := header.Get("Retry-After")
-	if seconds, err := strconv.ParseUint(value, 10, 31); err == nil {
-		return time.Duration(seconds) * time.Second
+	seconds, err := strconv.ParseUint(value, 10, 64)
+	if err == nil || errors.Is(err, strconv.ErrRange) {
+		return time.Duration(min(seconds, uint64(maxRetryAfter/time.Second))) * time.Second
 	}
 	if at, err := http.ParseTime(value); err == nil {
-		return max(time.Until(at), 0)
+		return min(max(time.Until(at), 0), maxRetryAfter)
 	}
 	return 0
 }
