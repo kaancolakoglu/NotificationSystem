@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"net/url"
+	"slices"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -35,10 +41,17 @@ const (
 	maxIdempotencyKeyBytes = 255
 	maxBatchSize           = 1000
 
+	defaultPageSize int32 = 50
+	maxPageSize     int32 = 200
+
 	idempotencyKeyConflictMessage = "Idempotency-Key was already used with a different request body"
 )
 
 var idempotencyKeyLengthMessage = fmt.Sprintf("Idempotency-Key must be 1 to %d bytes long", maxIdempotencyKeyBytes)
+
+var queryParameters = map[string][]string{
+	"GET /v1/notifications": {"status", "channel", "created_from", "created_to", "batch_id", "limit", "cursor"},
+}
 
 var (
 	errIdempotencyKeyUsed     = errors.New("idempotency key already used")
@@ -65,7 +78,31 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
 	HandlerWithOptions(handler, StdHTTPServerOptions{
 		BaseRouter:       mux,
 		ErrorHandlerFunc: requestErrorHandler,
+		Middlewares:      []MiddlewareFunc{checkQueryParameters(logger)},
 	})
+}
+
+func checkQueryParameters(logger *slog.Logger) MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			query, err := url.ParseQuery(r.URL.RawQuery)
+			if err != nil {
+				writeError(r.Context(), w, logger, http.StatusBadRequest, "query string is not valid")
+				return
+			}
+			for _, name := range slices.Sorted(maps.Keys(query)) {
+				if !slices.Contains(queryParameters[r.Pattern], name) {
+					writeError(r.Context(), w, logger, http.StatusBadRequest, fmt.Sprintf("parameter %q is not known", name))
+					return
+				}
+				if len(query[name]) > 1 {
+					writeError(r.Context(), w, logger, http.StatusBadRequest, fmt.Sprintf("parameter %q must be sent once", name))
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (s *server) CreateNotification(ctx context.Context, request CreateNotificationRequestObject) (CreateNotificationResponseObject, error) {
@@ -184,6 +221,96 @@ func (s *server) GetNotification(ctx context.Context, request GetNotificationReq
 	return GetNotification200JSONResponse(notification), nil
 }
 
+func (s *server) ListNotifications(ctx context.Context, request ListNotificationsRequestObject) (ListNotificationsResponseObject, error) {
+	params := request.Params
+	limit := defaultPageSize
+	if params.Limit != nil {
+		limit = *params.Limit
+	}
+	if limit < 1 || limit > maxPageSize {
+		return ListNotifications400JSONResponse{Message: fmt.Sprintf("limit must be 1 to %d", maxPageSize)}, nil
+	}
+	var status, channel pgtype.Text
+	if params.Status != nil {
+		if !params.Status.Valid() {
+			return ListNotifications400JSONResponse{Message: "status must be one of pending, processing, sent, failed, cancelled"}, nil
+		}
+		status = pgtype.Text{String: string(*params.Status), Valid: true}
+	}
+	if params.Channel != nil {
+		if !params.Channel.Valid() {
+			return ListNotifications400JSONResponse{Message: "channel must be one of sms, email, push"}, nil
+		}
+		channel = pgtype.Text{String: string(*params.Channel), Valid: true}
+	}
+
+	var minID, maxID pgtype.UUID
+	if params.CreatedFrom != nil {
+		if params.CreatedFrom.IsZero() {
+			return ListNotifications400JSONResponse{Message: `parameter "created_from" is not valid`}, nil
+		}
+		minID = pgtype.UUID{Bytes: firstIDAt(*params.CreatedFrom), Valid: true}
+	}
+	if params.CreatedTo != nil {
+		if params.CreatedTo.IsZero() {
+			return ListNotifications400JSONResponse{Message: `parameter "created_to" is not valid`}, nil
+		}
+		maxID = pgtype.UUID{Bytes: firstIDAt(*params.CreatedTo), Valid: true}
+	}
+	if params.CreatedFrom != nil && params.CreatedTo != nil && !params.CreatedFrom.Before(*params.CreatedTo) {
+		return ListNotifications400JSONResponse{Message: "created_from must be before created_to"}, nil
+	}
+	if params.Cursor != nil {
+		cursor, err := decodeCursor(*params.Cursor)
+		if err != nil {
+			return ListNotifications400JSONResponse{Message: "cursor is not valid"}, nil
+		}
+		if !maxID.Valid || bytes.Compare(cursor[:], maxID.Bytes[:]) < 0 {
+			maxID = pgtype.UUID{Bytes: cursor, Valid: true}
+		}
+	}
+
+	var rows []store.Notification
+	var err error
+	if params.BatchId != nil {
+		rows, err = s.queries.ListBatchNotifications(ctx, store.ListBatchNotificationsParams{
+			BatchID:  pgtype.UUID{Bytes: *params.BatchId, Valid: true},
+			MinID:    minID,
+			MaxID:    maxID,
+			Status:   status,
+			Channel:  channel,
+			RowLimit: limit + 1,
+		})
+	} else {
+		rows, err = s.queries.ListNotifications(ctx, store.ListNotificationsParams{
+			MinID:    minID,
+			MaxID:    maxID,
+			Status:   status,
+			Channel:  channel,
+			RowLimit: limit + 1,
+		})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list notifications: %w", err)
+	}
+
+	var nextCursor *string
+	if len(rows) > int(limit) {
+		rows = rows[:limit]
+		cursor := encodeCursor(rows[limit-1].ID)
+		nextCursor = &cursor
+	}
+	notifications := make([]Notification, 0, len(rows))
+	for _, row := range rows {
+		notification, err := toNotification(row)
+		if err != nil {
+			return nil, err
+		}
+		notifications = append(notifications, notification)
+	}
+	return ListNotifications200JSONResponse{Notifications: notifications, NextCursor: nextCursor}, nil
+}
+
 func (s *server) GetBatch(ctx context.Context, request GetBatchRequestObject) (GetBatchResponseObject, error) {
 	counts, err := s.queries.CountBatchByStatus(ctx, pgtype.UUID{Bytes: request.Id, Valid: true})
 	if err != nil {
@@ -279,6 +406,35 @@ func validateRequest(body CreateNotificationRequest, priority Priority) (int16, 
 	return priorityValue, nil
 }
 
+func firstIDAt(t time.Time) uuid.UUID {
+	millis := t.UnixMilli()
+	if t.After(time.UnixMilli(millis)) {
+		millis++
+	}
+	if millis < 0 {
+		millis = 0
+	}
+	var id uuid.UUID
+	binary.BigEndian.PutUint64(id[:8], uint64(millis)<<16)
+	return id
+}
+
+func encodeCursor(id uuid.UUID) string {
+	return base64.RawURLEncoding.EncodeToString(id[:])
+}
+
+func decodeCursor(cursor string) (uuid.UUID, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("decode cursor: %w", err)
+	}
+	id, err := uuid.FromBytes(decoded)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("decode cursor: %w", err)
+	}
+	return id, nil
+}
+
 func validIdempotencyKey(key *string) bool {
 	return key == nil || (*key != "" && len(*key) <= maxIdempotencyKeyBytes)
 }
@@ -288,6 +444,11 @@ func toNotification(row store.Notification) (Notification, error) {
 	if !ok {
 		return Notification{}, fmt.Errorf("notification %s has unknown priority %d", row.ID, row.Priority)
 	}
+	var batchID *uuid.UUID
+	if row.BatchID.Valid {
+		id := uuid.UUID(row.BatchID.Bytes)
+		batchID = &id
+	}
 	return Notification{
 		Id:        row.ID,
 		Recipient: row.Recipient,
@@ -296,6 +457,7 @@ func toNotification(row store.Notification) (Notification, error) {
 		Priority:  priority,
 		Status:    Status(row.Status),
 		CreatedAt: row.CreatedAt,
+		BatchId:   batchID,
 	}, nil
 }
 

@@ -119,7 +119,20 @@ These are settled. Raise it before changing one.
   do not matter. A key is 1 to 255 bytes, else 400. Only an accepted request
   stores its key: a rejected one can be corrected and sent again with the
   same key.
-- Pagination is keyset on `id` descending with an opaque cursor.
+- Pagination is keyset on `id` descending with an opaque cursor. Limit is 1
+  to 200, default 50, else 400.
+- List filters: status, channel, batch_id, created from and to. Every invalid
+  query parameter is 400. So is one sent more than once, and one the
+  endpoint does not define, on every endpoint. Reason: a mistyped filter
+  name would otherwise return the unfiltered list. The created range is matched against the time
+  inside the id, not `created_at`. Reason: the id is the sort key, so the
+  range and the cursor become one id range on the primary key and need no
+  index. `created_at` is the database clock and can differ from the id time
+  by milliseconds.
+- The list adds no index. Status and channel are filters on the primary key
+  scan. With `batch_id` a second query reads the batch index and applies the
+  id range as a filter. Reason: as an index condition the planner combined
+  it with a scan of the whole primary key.
 - Cancel works only from `pending`: 200 on success, 409 otherwise, 404 if
   unknown.
 - Provider call: JSON `{"to","channel","content"}`, header

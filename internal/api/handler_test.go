@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -141,6 +143,17 @@ func TestCreateNotification(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("query parameter", func(t *testing.T) {
+		before := countNotifications(t, pool)
+
+		rec := postJSON(t, mux, "/v1/notifications?dry_run=true", `{"recipient":"+905551234567","channel":"sms","content":"hello"}`, nil)
+
+		wantError(t, rec, http.StatusBadRequest, `parameter "dry_run" is not known`)
+		if after := countNotifications(t, pool); after != before {
+			t.Errorf("rows went from %d to %d, want no insert", before, after)
+		}
+	})
 
 	t.Run("database failure", func(t *testing.T) {
 		pool.Close()
@@ -506,6 +519,28 @@ func TestGetNotification(t *testing.T) {
 		}
 	})
 
+	t.Run("found in a batch", func(t *testing.T) {
+		batchID, err := uuid.NewV7()
+		if err != nil {
+			t.Fatalf("generate batch id: %v", err)
+		}
+		inBatch, err := uuid.NewV7()
+		if err != nil {
+			t.Fatalf("generate id: %v", err)
+		}
+		insertNotification(t, pool, inBatch, "sms", "pending", pgtype.UUID{Bytes: batchID, Valid: true})
+
+		rec := get(t, inBatch.String())
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body)
+		}
+		got := decodeBody[api.Notification](t, rec)
+		if got.BatchId == nil || *got.BatchId != batchID {
+			t.Errorf("batch_id = %v, want %s", got.BatchId, batchID)
+		}
+	})
+
 	t.Run("unknown id", func(t *testing.T) {
 		unknown, err := uuid.NewV7()
 		if err != nil {
@@ -517,6 +552,10 @@ func TestGetNotification(t *testing.T) {
 
 	t.Run("malformed id", func(t *testing.T) {
 		wantError(t, get(t, "not-a-uuid"), http.StatusBadRequest, `parameter "id" is not valid`)
+	})
+
+	t.Run("query parameter", func(t *testing.T) {
+		wantError(t, get(t, id.String()+"?status=pending"), http.StatusBadRequest, `parameter "status" is not known`)
 	})
 
 	t.Run("database failure", func(t *testing.T) {
@@ -622,6 +661,328 @@ func TestGetBatch(t *testing.T) {
 
 		wantError(t, get(t, created.BatchId.String()), http.StatusInternalServerError, "internal error")
 	})
+}
+
+func TestListNotifications(t *testing.T) {
+	mux, pool := newTestServer(t)
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	batchID := idAt(base, 100)
+	inBatch := pgtype.UUID{Bytes: batchID, Valid: true}
+	rows := []struct {
+		channel string
+		status  string
+		batchID pgtype.UUID
+	}{
+		{channel: "sms", status: "pending"},
+		{channel: "email", status: "sent"},
+		{channel: "push", status: "failed"},
+		{channel: "sms", status: "sent", batchID: inBatch},
+		{channel: "email", status: "pending", batchID: inBatch},
+		{channel: "sms", status: "cancelled"},
+	}
+	ids := make([]uuid.UUID, len(rows))
+	for i, row := range rows {
+		ids[i] = idAt(base.Add(time.Duration(i)*time.Hour), byte(i))
+		insertNotification(t, pool, ids[i], row.channel, row.status, row.batchID)
+	}
+	pick := func(indexes ...int) []uuid.UUID {
+		picked := make([]uuid.UUID, 0, len(indexes))
+		for _, index := range indexes {
+			picked = append(picked, ids[index])
+		}
+		return picked
+	}
+	at := func(hours int) string {
+		return base.Add(time.Duration(hours) * time.Hour).Format(time.RFC3339)
+	}
+	batch := "batch_id=" + batchID.String()
+
+	filters := []struct {
+		name  string
+		query string
+		want  []uuid.UUID
+	}{
+		{name: "no filter", query: "", want: pick(5, 4, 3, 2, 1, 0)},
+		{name: "status", query: "status=sent", want: pick(3, 1)},
+		{name: "channel", query: "channel=sms", want: pick(5, 3, 0)},
+		{name: "status and channel", query: "status=sent&channel=sms", want: pick(3)},
+		{name: "created from is inclusive", query: "created_from=" + at(2), want: pick(5, 4, 3, 2)},
+		{name: "created to is exclusive", query: "created_to=" + at(2), want: pick(1, 0)},
+		{name: "created range", query: "created_from=" + at(1) + "&created_to=" + at(4), want: pick(3, 2, 1)},
+		{name: "created from with an offset", query: "created_from=2026-01-01T05:00:00%2B03:00", want: pick(5, 4, 3, 2)},
+		{name: "created from between two milliseconds", query: "created_from=2026-01-01T02:00:00.0005Z", want: pick(5, 4, 3)},
+		{name: "created to between two milliseconds", query: "created_to=2026-01-01T02:00:00.0005Z", want: pick(2, 1, 0)},
+		{name: "created from as a date is midnight utc", query: "created_from=2026-01-01", want: pick(5, 4, 3, 2, 1, 0)},
+		{name: "created to as a date is midnight utc", query: "created_to=2026-01-01", want: pick()},
+		{name: "created from before 1970", query: "created_from=1900-01-01T00:00:00Z", want: pick(5, 4, 3, 2, 1, 0)},
+		{name: "created to before 1970", query: "created_to=1900-01-01T00:00:00Z", want: pick()},
+		{name: "batch", query: batch, want: pick(4, 3)},
+		{name: "batch and status", query: batch + "&status=sent", want: pick(3)},
+		{name: "batch and channel", query: batch + "&channel=email", want: pick(4)},
+		{name: "batch and created from", query: batch + "&created_from=" + at(4), want: pick(4)},
+		{name: "batch and created to", query: batch + "&created_to=" + at(4), want: pick(3)},
+		{name: "unknown batch", query: "batch_id=" + idAt(base, 101).String(), want: pick()},
+		{name: "nothing matches", query: "status=processing", want: pick()},
+		{name: "full page is the last page", query: "limit=6", want: pick(5, 4, 3, 2, 1, 0)},
+	}
+	for _, tt := range filters {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := list(t, mux, tt.query)
+
+			page := wantPage(t, rec, tt.want)
+			if page.NextCursor != nil {
+				t.Errorf("next_cursor = %q, want none", *page.NextCursor)
+			}
+			if len(tt.want) == 0 && !strings.Contains(rec.Body.String(), `"notifications":[]`) {
+				t.Errorf("body = %s, want an empty array", rec.Body)
+			}
+		})
+	}
+
+	t.Run("notification fields", func(t *testing.T) {
+		page := wantPage(t, list(t, mux, batch+"&status=sent"), pick(3))
+
+		got := page.Notifications[0]
+		if got.BatchId == nil || *got.BatchId != batchID {
+			t.Fatalf("batch_id = %v, want %s", got.BatchId, batchID)
+		}
+		want := api.Notification{
+			Id:        ids[3],
+			Recipient: "+905551234567",
+			Channel:   api.Sms,
+			Content:   "hello",
+			Priority:  api.Normal,
+			Status:    api.Sent,
+			CreatedAt: got.CreatedAt,
+			BatchId:   got.BatchId,
+		}
+		if got != want {
+			t.Errorf("notification = %+v, want %+v", got, want)
+		}
+	})
+
+	pages := []struct {
+		name  string
+		query string
+		want  [][]uuid.UUID
+	}{
+		{name: "pages follow the cursor", query: "limit=2", want: [][]uuid.UUID{pick(5, 4), pick(3, 2), pick(1, 0)}},
+		{name: "pages keep the filter", query: "channel=sms&limit=1", want: [][]uuid.UUID{pick(5), pick(3), pick(0)}},
+		{name: "pages of a batch", query: batch + "&limit=1", want: [][]uuid.UUID{pick(4), pick(3)}},
+		{name: "pages inside a created range", query: "created_from=" + at(1) + "&created_to=" + at(5) + "&limit=3", want: [][]uuid.UUID{pick(4, 3, 2), pick(1)}},
+	}
+	for _, tt := range pages {
+		t.Run(tt.name, func(t *testing.T) {
+			query := tt.query
+			for i, want := range tt.want {
+				page := wantPage(t, list(t, mux, query), want)
+
+				last := i == len(tt.want)-1
+				if last != (page.NextCursor == nil) {
+					t.Fatalf("page %d: next_cursor = %v, last page = %t", i, page.NextCursor, last)
+				}
+				if !last {
+					query = tt.query + "&cursor=" + *page.NextCursor
+				}
+			}
+		})
+	}
+
+	t.Run("cursor and created to: the older one wins", func(t *testing.T) {
+		afterFour := wantPage(t, list(t, mux, "limit=2"), pick(5, 4)).NextCursor
+		afterTwo := wantPage(t, list(t, mux, "limit=4"), pick(5, 4, 3, 2)).NextCursor
+		if afterFour == nil || afterTwo == nil {
+			t.Fatal("want a next_cursor on both pages")
+		}
+
+		wantPage(t, list(t, mux, "created_to="+at(3)+"&cursor="+*afterFour), pick(2, 1, 0))
+		wantPage(t, list(t, mux, "created_to="+at(5)+"&cursor="+*afterTwo), pick(1, 0))
+	})
+
+	invalid := []struct {
+		name        string
+		query       string
+		wantMessage string
+	}{
+		{name: "unknown status", query: "status=done", wantMessage: "status must be one of pending, processing, sent, failed, cancelled"},
+		{name: "unknown channel", query: "channel=fax", wantMessage: "channel must be one of sms, email, push"},
+		{name: "limit zero", query: "limit=0", wantMessage: "limit must be 1 to 200"},
+		{name: "limit over the maximum", query: "limit=201", wantMessage: "limit must be 1 to 200"},
+		{name: "limit not a number", query: "limit=ten", wantMessage: `parameter "limit" is not valid`},
+		{name: "created from not a time", query: "created_from=yesterday", wantMessage: `parameter "created_from" is not valid`},
+		{name: "created to not a time", query: "created_to=noon", wantMessage: `parameter "created_to" is not valid`},
+		{name: "created from empty", query: "created_from=", wantMessage: `parameter "created_from" is not valid`},
+		{name: "created to empty", query: "created_to=", wantMessage: `parameter "created_to" is not valid`},
+		{name: "status empty", query: "status=", wantMessage: "status must be one of pending, processing, sent, failed, cancelled"},
+		{name: "channel empty", query: "channel=", wantMessage: "channel must be one of sms, email, push"},
+		{name: "limit empty", query: "limit=", wantMessage: `parameter "limit" is not valid`},
+		{name: "limit sent twice", query: "limit=2&limit=3", wantMessage: `parameter "limit" is not valid`},
+		{name: "created from sent twice", query: "created_from=2026-01-01&created_from=2026-01-02", wantMessage: `parameter "created_from" must be sent once`},
+		{name: "created to sent twice", query: "created_to=2026-01-01&created_to=2026-01-02", wantMessage: `parameter "created_to" must be sent once`},
+		{name: "created from after created to", query: "created_from=2026-01-02&created_to=2026-01-01", wantMessage: "created_from must be before created_to"},
+		{name: "created from equal to created to", query: "created_from=2026-01-01&created_to=2026-01-01", wantMessage: "created_from must be before created_to"},
+		{name: "unknown parameter", query: "batchId=" + batchID.String(), wantMessage: `parameter "batchId" is not known`},
+		{name: "two unknown parameters name the first by name", query: "zeta=1&alpha=1", wantMessage: `parameter "alpha" is not known`},
+		{name: "bad escape in the query string", query: "status=%zz", wantMessage: "query string is not valid"},
+		{name: "semicolon in the query string", query: "status=sent;channel=sms", wantMessage: "query string is not valid"},
+		{name: "batch id empty", query: "batch_id=", wantMessage: `parameter "batch_id" is not valid`},
+		{name: "cursor empty", query: "cursor=", wantMessage: "cursor is not valid"},
+		{name: "batch id not a uuid", query: "batch_id=1", wantMessage: `parameter "batch_id" is not valid`},
+		{name: "cursor not base64", query: "cursor=***", wantMessage: "cursor is not valid"},
+		{name: "cursor of the wrong length", query: "cursor=YWJj", wantMessage: "cursor is not valid"},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			wantError(t, list(t, mux, tt.query), http.StatusBadRequest, tt.wantMessage)
+		})
+	}
+
+	t.Run("database failure", func(t *testing.T) {
+		pool.Close()
+
+		wantError(t, list(t, mux, ""), http.StatusInternalServerError, "internal error")
+		wantError(t, list(t, mux, batch), http.StatusInternalServerError, "internal error")
+	})
+}
+
+func TestListNotificationsPaging(t *testing.T) {
+	mux, pool := newTestServer(t)
+
+	const existing = 205
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	inserts := make([]store.InsertBatchNotificationsParams, existing)
+	newestFirst := make([]uuid.UUID, existing)
+	for i := range existing {
+		id := idAt(base.Add(time.Duration(i/3)*time.Second), byte(i%3))
+		inserts[i] = store.InsertBatchNotificationsParams{ID: id, Recipient: "+905551234567", Channel: "sms", Content: "hello", Priority: 1}
+		newestFirst[existing-1-i] = id
+	}
+	if _, err := store.New(pool).InsertBatchNotifications(t.Context(), inserts); err != nil {
+		t.Fatalf("insert notifications: %v", err)
+	}
+
+	t.Run("default limit is 50", func(t *testing.T) {
+		page := wantPage(t, list(t, mux, ""), newestFirst[:50])
+
+		if page.NextCursor == nil {
+			t.Error("want a next_cursor")
+		}
+	})
+
+	t.Run("largest limit is 200", func(t *testing.T) {
+		first := wantPage(t, list(t, mux, "limit=200"), newestFirst[:200])
+		if first.NextCursor == nil {
+			t.Fatal("want a next_cursor")
+		}
+
+		rest := wantPage(t, list(t, mux, "limit=200&cursor="+*first.NextCursor), newestFirst[200:])
+		if rest.NextCursor != nil {
+			t.Errorf("next_cursor = %q, want none", *rest.NextCursor)
+		}
+	})
+
+	t.Run("pages stay stable while rows are inserted", func(t *testing.T) {
+		var seen, added []uuid.UUID
+		query := "limit=50"
+		for {
+			page := decodeBody[api.NotificationList](t, list(t, mux, query))
+			for _, notification := range page.Notifications {
+				seen = append(seen, notification.Id)
+			}
+			if page.NextCursor == nil {
+				break
+			}
+			query = "limit=50&cursor=" + *page.NextCursor
+
+			rec := postNotification(t, mux, `{"recipient":"+905551234567","channel":"sms","content":"hello"}`)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusAccepted, rec.Body)
+			}
+			added = append(added, decodeBody[api.Notification](t, rec).Id)
+		}
+
+		if !slices.Equal(seen, newestFirst) {
+			t.Errorf("pages held %d ids, want the %d ids that existed at the first page, in order", len(seen), existing)
+		}
+		if len(added) != 4 {
+			t.Fatalf("added %d rows between pages, want 4", len(added))
+		}
+		slices.Reverse(added)
+		wantPage(t, list(t, mux, "limit=4"), added)
+	})
+
+	t.Run("an id made by the api is matched by its own time", func(t *testing.T) {
+		rec := postNotification(t, mux, `{"recipient":"+905551234567","channel":"sms","content":"hello"}`)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusAccepted, rec.Body)
+		}
+		id := decodeBody[api.Notification](t, rec).Id
+		sec, nsec := id.Time().UnixTime()
+		created := time.Unix(sec, nsec).UTC()
+		contains := func(query string) bool {
+			page := decodeBody[api.NotificationList](t, list(t, mux, query))
+			return slices.ContainsFunc(page.Notifications, func(n api.Notification) bool { return n.Id == id })
+		}
+
+		if !contains("created_from=" + created.Format(time.RFC3339Nano)) {
+			t.Error("created_from at the id time must include the notification")
+		}
+		if contains("created_from=" + created.Add(time.Millisecond).Format(time.RFC3339Nano)) {
+			t.Error("created_from after the id time must exclude the notification")
+		}
+		if contains("created_to=" + created.Format(time.RFC3339Nano)) {
+			t.Error("created_to at the id time must exclude the notification")
+		}
+		if !contains("created_to=" + created.Add(time.Millisecond).Format(time.RFC3339Nano)) {
+			t.Error("created_to after the id time must include the notification")
+		}
+	})
+}
+
+func idAt(t time.Time, n byte) uuid.UUID {
+	var id uuid.UUID
+	binary.BigEndian.PutUint64(id[:8], uint64(t.UnixMilli())<<16)
+	id[6] |= 0x70
+	id[8] = 0x80
+	id[15] = n
+	return id
+}
+
+func insertNotification(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, channel, status string, batchID pgtype.UUID) {
+	t.Helper()
+	_, err := pool.Exec(
+		t.Context(),
+		"INSERT INTO notifications (id, recipient, channel, content, priority, status, batch_id) VALUES ($1, '+905551234567', $2, 'hello', 1, $3, $4)",
+		id, channel, status, batchID,
+	)
+	if err != nil {
+		t.Fatalf("insert notification: %v", err)
+	}
+}
+
+func list(t *testing.T, mux *http.ServeMux, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/notifications?"+query, nil)
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func wantPage(t *testing.T, rec *httptest.ResponseRecorder, want []uuid.UUID) api.NotificationList {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body)
+	}
+	page := decodeBody[api.NotificationList](t, rec)
+	got := make([]uuid.UUID, 0, len(page.Notifications))
+	for _, notification := range page.Notifications {
+		got = append(got, notification.Id)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ids = %v, want %v", got, want)
+	}
+	return page
 }
 
 func postNotification(t *testing.T, mux *http.ServeMux, body string, idempotencyKeys ...string) *httptest.ResponseRecorder {

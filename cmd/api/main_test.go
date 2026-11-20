@@ -86,3 +86,32 @@ func TestBatchBodyLimit(t *testing.T) {
 		}
 	})
 }
+
+func TestQueryParametersAreCheckedPerRoute(t *testing.T) {
+	tests := []struct {
+		name        string
+		method      string
+		target      string
+		wantMessage string
+	}{
+		{name: "known on the list", method: http.MethodGet, target: "/v1/notifications?limit=0", wantMessage: "limit must be 1 to 200"},
+		{name: "unknown on the list", method: http.MethodGet, target: "/v1/notifications?size=10", wantMessage: `parameter \"size\" is not known`},
+		{name: "list parameter on another route", method: http.MethodGet, target: "/v1/batches/019a0000-0000-7000-8000-000000000000?limit=10", wantMessage: `parameter \"limit\" is not known`},
+		{name: "list parameter on the batch route", method: http.MethodPost, target: "/v1/notifications/batch?limit=10", wantMessage: `parameter \"limit\" is not known`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(t.Context(), tt.method, tt.target, nil)
+
+			newHandler(nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusBadRequest, rec.Body)
+			}
+			if !strings.Contains(rec.Body.String(), tt.wantMessage) {
+				t.Errorf("body = %s, want it to contain %s", rec.Body, tt.wantMessage)
+			}
+		})
+	}
+}

@@ -30,3 +30,22 @@ SELECT
     count(*) FILTER (WHERE status = 'cancelled') AS cancelled
 FROM notifications
 WHERE batch_id = $1;
+
+-- name: ListNotifications :many
+SELECT * FROM notifications
+WHERE id >= coalesce(sqlc.narg('min_id'), '00000000-0000-0000-0000-000000000000'::uuid)
+  AND id < coalesce(sqlc.narg('max_id'), 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
+  AND (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status'))
+  AND (sqlc.narg('channel')::text IS NULL OR channel = sqlc.narg('channel'))
+ORDER BY id DESC
+LIMIT sqlc.arg('row_limit');
+
+-- name: ListBatchNotifications :many
+SELECT * FROM notifications
+WHERE batch_id = sqlc.arg('batch_id')
+  AND (sqlc.narg('min_id')::uuid IS NULL OR id >= sqlc.narg('min_id'))
+  AND (sqlc.narg('max_id')::uuid IS NULL OR id < sqlc.narg('max_id'))
+  AND (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status'))
+  AND (sqlc.narg('channel')::text IS NULL OR channel = sqlc.narg('channel'))
+ORDER BY id DESC
+LIMIT sqlc.arg('row_limit');

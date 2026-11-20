@@ -149,3 +149,112 @@ func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotification
 	)
 	return i, err
 }
+
+const listBatchNotifications = `-- name: ListBatchNotifications :many
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id FROM notifications
+WHERE batch_id = $1
+  AND ($2::uuid IS NULL OR id >= $2)
+  AND ($3::uuid IS NULL OR id < $3)
+  AND ($4::text IS NULL OR status = $4)
+  AND ($5::text IS NULL OR channel = $5)
+ORDER BY id DESC
+LIMIT $6
+`
+
+type ListBatchNotificationsParams struct {
+	BatchID  pgtype.UUID
+	MinID    pgtype.UUID
+	MaxID    pgtype.UUID
+	Status   pgtype.Text
+	Channel  pgtype.Text
+	RowLimit int32
+}
+
+func (q *Queries) ListBatchNotifications(ctx context.Context, arg ListBatchNotificationsParams) ([]Notification, error) {
+	rows, err := q.db.Query(ctx, listBatchNotifications,
+		arg.BatchID,
+		arg.MinID,
+		arg.MaxID,
+		arg.Status,
+		arg.Channel,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Notification
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.Recipient,
+			&i.Channel,
+			&i.Content,
+			&i.Priority,
+			&i.Status,
+			&i.CreatedAt,
+			&i.BatchID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNotifications = `-- name: ListNotifications :many
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id FROM notifications
+WHERE id >= coalesce($1, '00000000-0000-0000-0000-000000000000'::uuid)
+  AND id < coalesce($2, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
+  AND ($3::text IS NULL OR status = $3)
+  AND ($4::text IS NULL OR channel = $4)
+ORDER BY id DESC
+LIMIT $5
+`
+
+type ListNotificationsParams struct {
+	MinID    pgtype.UUID
+	MaxID    pgtype.UUID
+	Status   pgtype.Text
+	Channel  pgtype.Text
+	RowLimit int32
+}
+
+func (q *Queries) ListNotifications(ctx context.Context, arg ListNotificationsParams) ([]Notification, error) {
+	rows, err := q.db.Query(ctx, listNotifications,
+		arg.MinID,
+		arg.MaxID,
+		arg.Status,
+		arg.Channel,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Notification
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.Recipient,
+			&i.Channel,
+			&i.Content,
+			&i.Priority,
+			&i.Status,
+			&i.CreatedAt,
+			&i.BatchID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
