@@ -272,9 +272,13 @@ GET  /healthz   GET /readyz   GET /metrics   GET /openapi.yaml
 ## Go tooling
 
 - Make targets: `fmt`, `lint`, `test` (everything, with `-race`),
-  `test-short` (unit only), `check` (lint and test), `generate`, `up`,
-  `down`.
+  `test-short` (unit only), `test-isolated`, `check` (lint and test),
+  `generate`, `up`, `down`.
 - Integration tests skip under `-short`. No build tags.
+- Database tests in one package share one Postgres container, and each
+  test gets its own database in it. Reason: a container per test took 1 s
+  per test. `make test-isolated` gives every test its own container again,
+  to check that no test passes only because the server is shared.
 - golangci-lint v2: default linters plus `bodyclose`, `noctx`, `errorlint`,
   `gosec`, `misspell`. Formatters `gofumpt` and `goimports`.
 - oapi-codegen, sqlc and golangci-lint are each pinned as a `tool` in a
