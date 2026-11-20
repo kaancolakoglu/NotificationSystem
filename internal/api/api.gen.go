@@ -135,6 +135,9 @@ type CreateNotificationRequest struct {
 	Content   string    `json:"content"`
 	Priority  *Priority `json:"priority,omitempty"`
 	Recipient string    `json:"recipient"`
+
+	// ScheduledAt Do not send before this time, an RFC 3339 date and time. Without it, or with a time in the past, the notification is due at once. Until its time the notification is pending and can be cancelled. The response does not include it.
+	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
 }
 
 // DeliveryAttempt defines model for DeliveryAttempt.

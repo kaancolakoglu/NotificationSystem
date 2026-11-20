@@ -388,6 +388,14 @@ components:
           allOf:
             - $ref: "#/components/schemas/Priority"
           default: normal
+        scheduled_at:
+          type: string
+          format: date-time
+          description: >-
+            Do not send before this time, an RFC 3339 date and time. Without
+            it, or with a time in the past, the notification is due at once.
+            Until its time the notification is pending and can be cancelled.
+            The response does not include it.
     Notification:
       type: object
       required: [id, recipient, channel, content, priority, status, created_at, attempts]

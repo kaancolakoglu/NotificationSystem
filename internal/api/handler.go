@@ -199,6 +199,7 @@ func (s *server) CreateNotification(ctx context.Context, request CreateNotificat
 			Content:       body.Content,
 			Priority:      priorityValue,
 			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
+			ScheduledAt:   timestamptz(body.ScheduledAt),
 		})
 		if err != nil {
 			return Notification{}, fmt.Errorf("insert notification: %w", err)
@@ -242,6 +243,10 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 			return nil, fmt.Errorf("generate id: %w", err)
 		}
 		results[i].Id = &id
+		var scheduledAt time.Time
+		if item.ScheduledAt != nil {
+			scheduledAt = *item.ScheduledAt
+		}
 		inserts = append(inserts, store.InsertBatchNotificationsParams{
 			ID:            id,
 			Recipient:     item.Recipient,
@@ -250,6 +255,7 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 			Priority:      priorityValue,
 			BatchID:       pgtype.UUID{Bytes: batchID, Valid: true},
 			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
+			NextAttemptAt: scheduledAt,
 		})
 	}
 	if len(inserts) == 0 {
@@ -261,6 +267,15 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 	}
 
 	created, err := createOnce(ctx, s, key, body, func(queries *store.Queries) (BatchCreated, error) {
+		now, err := queries.GetDatabaseTime(ctx)
+		if err != nil {
+			return BatchCreated{}, fmt.Errorf("get database time: %w", err)
+		}
+		for i := range inserts {
+			if inserts[i].NextAttemptAt.Before(now) {
+				inserts[i].NextAttemptAt = now
+			}
+		}
 		if _, err := queries.InsertBatchNotifications(ctx, inserts); err != nil {
 			return BatchCreated{}, fmt.Errorf("insert batch notifications: %w", err)
 		}
@@ -512,6 +527,13 @@ func priorityOf(body CreateNotificationRequest) Priority {
 	return *body.Priority
 }
 
+func timestamptz(t *time.Time) pgtype.Timestamptz {
+	if t == nil {
+		return pgtype.Timestamptz{}
+	}
+	return pgtype.Timestamptz{Time: *t, Valid: true}
+}
+
 func validateRequest(body CreateNotificationRequest, priority Priority) (int16, error) {
 	priorityValue, ok := priorities[priority]
 	if !ok {
@@ -607,6 +629,10 @@ func requestError(err error) (int, string) {
 	var invalidParam *InvalidParamFormatError
 	if errors.As(err, &invalidParam) {
 		return http.StatusBadRequest, fmt.Sprintf("parameter %q is not valid", invalidParam.ParamName)
+	}
+	var badTime *time.ParseError
+	if errors.As(err, &badTime) {
+		return http.StatusBadRequest, "scheduled_at must be a date and time in RFC 3339, for example 2026-01-02T15:04:05Z"
 	}
 	return http.StatusBadRequest, "request body must be a valid JSON object"
 }

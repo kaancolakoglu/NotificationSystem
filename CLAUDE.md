@@ -105,7 +105,28 @@ These are settled. Raise it before changing one.
 - Channel and priority have a CHECK too: `sms`, `email`, `push`, and 0, 1,
   2. Reason: workers claim by channel and priority, so a row with any other
   value would stay `pending` forever without an error.
-- Scheduling and retry delay share one column, `next_attempt_at`.
+- Scheduling and retry delay share one column, `next_attempt_at`. An
+  optional `scheduled_at` on a create request, or on an item of a batch,
+  sets it. Without one, or with a time in the past, the notification is
+  due at once and the column holds the database time of the insert.
+  Reason: a time in the past would put the row first in the claim order
+  and make the oldest pending age wrong. A batch asks the database for
+  its time once. Reason: its rows are written with COPY, which cannot
+  apply `now()` per row, and the API's clock may be ahead of the
+  database's. Without an `Idempotency-Key` that query and the COPY are
+  two statements, so a batch row can be due a moment before its
+  `created_at`. `scheduled_at` is RFC 3339, else 400. In a batch, one
+  that is not rejects the whole batch, like a field of the wrong type.
+  It is part of the idempotency hash as it was written. So with one key,
+  the same instant in another time zone is a different request, and so
+  are a time in the past and no time. Reason: turned into UTC first, a
+  time at the ends of the year range could not be hashed, and the
+  request failed. The API does not return it. Reason: it is stored only
+  in `next_attempt_at`, which a retry overwrites. A scheduled
+  notification stays `pending` until its time, so it counts in
+  `notifications_pending` and can be cancelled. The cost:
+  `notification_delivery_duration_seconds` includes the scheduled wait,
+  so a scheduled notification looks slow.
 - Validation runs at the API, in `internal/validate`, as a map from channel
   to function. Limits are named constants:
   - sms: recipient in E.164; content 1 to 1600 characters.
@@ -359,8 +380,8 @@ These are settled. Raise it before changing one.
     whatever its result. A call the breaker refused is not a call.
   - `notification_delivery_duration_seconds`: histogram of the worker's
     time when the `sent` result was stored, minus `created_at`, which the
-    database set. So it includes the retry delays, and any difference
-    between the two clocks. Buckets from 0.1 s to 1 hour.
+    database set. So it includes the retry delays, the wait of a
+    scheduled notification, and any difference between the two clocks. Buckets from 0.1 s to 1 hour.
   - `circuit_breaker_state`: 0 closed, 1 half-open, 2 open. Each worker
     reports its own breaker.
   - `rate_limiter_failures_total`: limiter calls that failed. That

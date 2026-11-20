@@ -200,6 +200,17 @@ func (q *Queries) DeleteExpiredIdempotencyKeys(ctx context.Context, rowLimit int
 	return result.RowsAffected(), nil
 }
 
+const getDatabaseTime = `-- name: GetDatabaseTime :one
+SELECT now()::timestamptz
+`
+
+func (q *Queries) GetDatabaseTime(ctx context.Context) (time.Time, error) {
+	row := q.db.QueryRow(ctx, getDatabaseTime)
+	var column_1 time.Time
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getIdempotencyKey = `-- name: GetIdempotencyKey :one
 SELECT request_hash, response FROM idempotency_keys
 WHERE key = $1
@@ -253,6 +264,7 @@ type InsertBatchNotificationsParams struct {
 	Priority      int16
 	BatchID       pgtype.UUID
 	CorrelationID pgtype.Text
+	NextAttemptAt time.Time
 }
 
 const insertIdempotencyKey = `-- name: InsertIdempotencyKey :execrows
@@ -276,8 +288,16 @@ func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotenc
 }
 
 const insertNotification = `-- name: InsertNotification :one
-INSERT INTO notifications (id, recipient, channel, content, priority, correlation_id)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO notifications (id, recipient, channel, content, priority, correlation_id, next_attempt_at)
+VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    greatest($7::timestamptz, now())
+)
 RETURNING id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id
 `
 
@@ -288,6 +308,7 @@ type InsertNotificationParams struct {
 	Content       string
 	Priority      int16
 	CorrelationID pgtype.Text
+	ScheduledAt   pgtype.Timestamptz
 }
 
 func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotificationParams) (Notification, error) {
@@ -298,6 +319,7 @@ func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotification
 		arg.Content,
 		arg.Priority,
 		arg.CorrelationID,
+		arg.ScheduledAt,
 	)
 	var i Notification
 	err := row.Scan(

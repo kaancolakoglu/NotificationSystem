@@ -36,6 +36,7 @@ func (r iteratorForInsertBatchNotifications) Values() ([]interface{}, error) {
 		r.rows[0].Priority,
 		r.rows[0].BatchID,
 		r.rows[0].CorrelationID,
+		r.rows[0].NextAttemptAt,
 	}, nil
 }
 
@@ -44,5 +45,5 @@ func (r iteratorForInsertBatchNotifications) Err() error {
 }
 
 func (q *Queries) InsertBatchNotifications(ctx context.Context, arg []InsertBatchNotificationsParams) (int64, error) {
-	return q.db.CopyFrom(ctx, []string{"notifications"}, []string{"id", "recipient", "channel", "content", "priority", "batch_id", "correlation_id"}, &iteratorForInsertBatchNotifications{rows: arg})
+	return q.db.CopyFrom(ctx, []string{"notifications"}, []string{"id", "recipient", "channel", "content", "priority", "batch_id", "correlation_id", "next_attempt_at"}, &iteratorForInsertBatchNotifications{rows: arg})
 }

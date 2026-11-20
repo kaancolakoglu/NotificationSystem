@@ -350,7 +350,10 @@ func TestCreateBatch(t *testing.T) {
 			want.ID = id
 			want.Status = "pending"
 			want.CreatedAt = row.CreatedAt
-			want.NextAttemptAt = row.CreatedAt
+			want.NextAttemptAt = row.NextAttemptAt
+			if row.NextAttemptAt.After(row.CreatedAt) || row.CreatedAt.Sub(row.NextAttemptAt) > 5*time.Second {
+				t.Errorf("result %d: due at %s and created at %s, want it due when it is created", index, row.NextAttemptAt, row.CreatedAt)
+			}
 			want.BatchID = pgtype.UUID{Bytes: got.BatchId, Valid: true}
 			want.CorrelationID = pgtype.Text{String: rec.Header().Get("X-Correlation-ID"), Valid: true}
 			if row != want {

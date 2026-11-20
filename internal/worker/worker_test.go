@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
@@ -595,6 +596,35 @@ func TestPoolClaimsOnlyItsFreeCapacity(t *testing.T) {
 
 	close(release)
 	waitFor(t, "every notification is sent", func() bool { return countByStatus(t, db, "sent") == 5 })
+}
+
+func TestScheduledNotificationIsSentAtItsTimeAndNotBefore(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	fake, client := newProvider(t, accept)
+	var scheduledAt time.Time
+	if err := db.QueryRow(t.Context(), "SELECT now() + interval '3 seconds'").Scan(&scheduledAt); err != nil {
+		t.Fatalf("read the database time: %v", err)
+	}
+	scheduled, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{ID: uuid.Must(uuid.NewV7()), Recipient: "+905551234567", Channel: "sms", Content: "hello", Priority: 0, ScheduledAt: pgtype.Timestamptz{Time: scheduledAt, Valid: true}})
+	if err != nil {
+		t.Fatalf("insert notification: %v", err)
+	}
+	atOnce := insert(t, queries, "sms", 2)
+
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	waitFor(t, "both notifications are sent", func() bool { return countByStatus(t, db, "sent") == 2 })
+
+	sentScheduled, sentAtOnce := get(t, queries, scheduled.ID), get(t, queries, atOnce.ID)
+	if sentScheduled.SentAt.Time.Before(scheduledAt) || sentScheduled.SentAt.Time.Sub(scheduledAt) > 5*time.Second {
+		t.Errorf("scheduled notification was sent at %s, want at its time %s or up to 5 s after", sentScheduled.SentAt.Time, scheduledAt)
+	}
+	if !sentAtOnce.SentAt.Time.Before(scheduledAt) {
+		t.Errorf("notification without a schedule was sent at %s, want before %s: a scheduled one of higher priority does not hold it up", sentAtOnce.SentAt.Time, scheduledAt)
+	}
+	if sentScheduled.Attempts != 1 || len(fake.keys()) != 2 {
+		t.Errorf("scheduled notification has %d attempts and the provider got %d requests, want 1 and 2", sentScheduled.Attempts, len(fake.keys()))
+	}
 }
 
 func TestCancelledRowIsNeverSent(t *testing.T) {
