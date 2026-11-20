@@ -11,6 +11,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type DeliveryAttempt struct {
+	NotificationID uuid.UUID
+	Attempt        int16
+	Error          pgtype.Text
+	CreatedAt      time.Time
+}
+
 type IdempotencyKey struct {
 	Key         string
 	RequestHash []byte
@@ -30,4 +37,6 @@ type Notification struct {
 	NextAttemptAt     time.Time
 	SentAt            pgtype.Timestamptz
 	ProviderMessageID pgtype.Text
+	Attempts          int16
+	LastError         pgtype.Text
 }

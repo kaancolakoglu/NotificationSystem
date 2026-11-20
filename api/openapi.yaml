@@ -196,7 +196,7 @@ paths:
   /v1/notifications/{id}:
     get:
       operationId: getNotification
-      summary: Get a notification by id
+      summary: Get a notification by id, with its delivery attempts
       parameters:
         - name: id
           in: path
@@ -206,11 +206,11 @@ paths:
             format: uuid
       responses:
         "200":
-          description: The notification.
+          description: The notification and every delivery attempt made so far.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Notification"
+                $ref: "#/components/schemas/NotificationDetail"
         "400":
           description: The id is not a UUID, or a query parameter was sent.
           content:
@@ -351,7 +351,7 @@ components:
           default: normal
     Notification:
       type: object
-      required: [id, recipient, channel, content, priority, status, created_at]
+      required: [id, recipient, channel, content, priority, status, created_at, attempts]
       properties:
         id:
           type: string
@@ -373,6 +373,41 @@ components:
           type: string
           format: uuid
           description: Present when the notification was created in a batch.
+        attempts:
+          type: integer
+          description: >-
+            How many times a worker has taken the notification to send it.
+            An attempt in progress is counted.
+        last_error:
+          type: string
+          description: >-
+            Why the last failed attempt failed. It stays after a later
+            attempt succeeds.
+    DeliveryAttempt:
+      type: object
+      required: [attempt, created_at]
+      properties:
+        attempt:
+          type: integer
+          description: Number of the attempt, from 1.
+        error:
+          type: string
+          description: Present when the attempt failed.
+        created_at:
+          type: string
+          format: date-time
+          description: When the result of the attempt was stored.
+    NotificationDetail:
+      allOf:
+        - $ref: "#/components/schemas/Notification"
+        - type: object
+          required: [delivery_attempts]
+          properties:
+            delivery_attempts:
+              type: array
+              description: Oldest first. An attempt appears once its result is stored.
+              items:
+                $ref: "#/components/schemas/DeliveryAttempt"
     NotificationList:
       type: object
       required: [notifications]

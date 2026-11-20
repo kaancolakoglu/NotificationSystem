@@ -68,19 +68,48 @@ WITH due AS (
     FOR UPDATE SKIP LOCKED
 )
 UPDATE notifications
-SET status = 'processing'
+SET status = 'processing',
+    attempts = notifications.attempts + 1
 FROM due
 WHERE notifications.id = due.id
 RETURNING notifications.*;
 
 -- name: MarkSent :execrows
-UPDATE notifications
-SET status = 'sent',
-    sent_at = now(),
-    provider_message_id = sqlc.narg('provider_message_id')
-WHERE id = sqlc.arg('id') AND status = 'processing';
+WITH written AS (
+    UPDATE notifications
+    SET status = 'sent',
+        sent_at = now(),
+        provider_message_id = sqlc.narg('provider_message_id')
+    WHERE id = sqlc.arg('id') AND status = 'processing'
+    RETURNING id, attempts
+)
+INSERT INTO delivery_attempts (notification_id, attempt)
+SELECT id, attempts FROM written;
 
 -- name: MarkFailed :execrows
-UPDATE notifications
-SET status = 'failed'
-WHERE id = $1 AND status = 'processing';
+WITH written AS (
+    UPDATE notifications
+    SET status = 'failed',
+        last_error = sqlc.arg('error')::text
+    WHERE id = sqlc.arg('id') AND status = 'processing'
+    RETURNING id, attempts, last_error
+)
+INSERT INTO delivery_attempts (notification_id, attempt, error)
+SELECT id, attempts, last_error FROM written;
+
+-- name: ScheduleRetry :execrows
+WITH written AS (
+    UPDATE notifications
+    SET status = 'pending',
+        next_attempt_at = now() + sqlc.arg('delay')::interval,
+        last_error = sqlc.arg('error')::text
+    WHERE id = sqlc.arg('id') AND status = 'processing'
+    RETURNING id, attempts, last_error
+)
+INSERT INTO delivery_attempts (notification_id, attempt, error)
+SELECT id, attempts, last_error FROM written;
+
+-- name: ListDeliveryAttempts :many
+SELECT attempt, error, created_at FROM delivery_attempts
+WHERE notification_id = $1
+ORDER BY attempt;

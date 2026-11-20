@@ -8,6 +8,12 @@ linters:
     - gosec
     - misspell
     - noctx
+  exclusions:
+    rules:
+      - path: internal/worker/worker\.go
+        linters:
+          - gosec
+        text: G404
 
 formatters:
   enable:

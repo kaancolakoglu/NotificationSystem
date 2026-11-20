@@ -524,6 +524,61 @@ func TestGetNotification(t *testing.T) {
 		if got != want {
 			t.Errorf("response = %+v, want %+v", got, want)
 		}
+		if !strings.Contains(rec.Body.String(), `"delivery_attempts":[]`) {
+			t.Errorf("body = %s, want an empty delivery_attempts list", rec.Body)
+		}
+	})
+
+	t.Run("with delivery attempts", func(t *testing.T) {
+		const failure = "provider answered 500, want 202"
+		retried, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{
+			ID:        uuid.Must(uuid.NewV7()),
+			Recipient: "device-token-1",
+			Channel:   "push",
+			Content:   "hello",
+			Priority:  2,
+		})
+		if err != nil {
+			t.Fatalf("insert notification: %v", err)
+		}
+		claim := func() {
+			t.Helper()
+			claimed, err := queries.ClaimNotifications(t.Context(), store.ClaimNotificationsParams{Channel: "push", Priority: 2, RowLimit: 1})
+			if err != nil || len(claimed) != 1 || claimed[0].ID != retried.ID {
+				t.Fatalf("claim = %+v, error %v, want the notification", claimed, err)
+			}
+		}
+		claim()
+		if changed, err := queries.ScheduleRetry(t.Context(), store.ScheduleRetryParams{ID: retried.ID, Error: failure, Delay: pgtype.Interval{Valid: true}}); err != nil || changed != 1 {
+			t.Fatalf("schedule retry: changed %d rows, error %v", changed, err)
+		}
+		claim()
+		if changed, err := queries.MarkSent(t.Context(), store.MarkSentParams{ID: retried.ID, ProviderMessageID: pgtype.Text{String: "message-1", Valid: true}}); err != nil || changed != 1 {
+			t.Fatalf("mark sent: changed %d rows, error %v", changed, err)
+		}
+
+		rec := get(t, retried.ID.String())
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body)
+		}
+		got := decodeBody[api.NotificationDetail](t, rec)
+		if got.Status != api.Sent || got.Attempts != 2 || got.LastError == nil || *got.LastError != failure {
+			t.Errorf("status = %s, attempts = %d, last_error = %v, want sent, 2 and %q", got.Status, got.Attempts, got.LastError, failure)
+		}
+		if len(got.DeliveryAttempts) != 2 {
+			t.Fatalf("delivery_attempts = %+v, want 2 of them", got.DeliveryAttempts)
+		}
+		first, second := got.DeliveryAttempts[0], got.DeliveryAttempts[1]
+		if first.Attempt != 1 || first.Error == nil || *first.Error != failure {
+			t.Errorf("first attempt = %+v, want number 1 with the error %q", first, failure)
+		}
+		if second.Attempt != 2 || second.Error != nil {
+			t.Errorf("second attempt = %+v, want number 2 with no error", second)
+		}
+		if first.CreatedAt.Before(retried.CreatedAt) || second.CreatedAt.Before(first.CreatedAt) {
+			t.Errorf("attempt times = %s then %s, want them in order after the creation at %s", first.CreatedAt, second.CreatedAt, retried.CreatedAt)
+		}
 	})
 
 	t.Run("found in a batch", func(t *testing.T) {

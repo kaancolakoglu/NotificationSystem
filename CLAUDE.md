@@ -160,6 +160,15 @@ These are settled. Raise it before changing one.
 - Backoff is full jitter: `random(0, 1s * 2^attempts)`, where `attempts` is
   the row's value after the failed send, so 1 after the first try. Maximum
   5 attempts, so the ceilings are 2, 4, 8 and 16 s.
+- A claim increments `attempts`, so an attempt in progress is counted.
+  Every provider call whose result is stored is one row in
+  `delivery_attempts (notification_id, attempt, error, created_at)`, written
+  in the same statement as the result, so the two cannot disagree. A result
+  that could not be stored leaves no row and is only logged. `error` is
+  null for the accepted attempt. `last_error` on the notification is the
+  error of the last failed attempt, and stays after a later success.
+- Every notification the API returns has `attempts` and `last_error`.
+  `GET /v1/notifications/{id}` also lists the delivery attempts.
 - Rate limit per channel: rate 90 per second, burst 5, so we release at
   most 95 in any one-second window. The limit of 100 is counted at the
   provider, and the spare 5 absorbs requests bunching on the way there. On
@@ -195,7 +204,10 @@ These are settled. Raise it before changing one.
   started, let in-flight sends finish (deadline 30 s), exit.
 - Compose uses `cmd/fakeprovider` by default. `PROVIDER_URL` switches to a
   webhook.site URL. Reason: free webhook.site URLs stop after 50 to 100
-  requests. The README says so. The worker exits at start if `PROVIDER_URL`
+  requests. The README says so. The fake provider answers 202. A
+  notification whose content starts with `script:` gets the listed statuses
+  instead, one per attempt, then 202: `script:500,429` fails twice. Its 429
+  carries `Retry-After: 1`. The worker exits at start if `PROVIDER_URL`
   is not an http or https URL. Reason: otherwise every notification would
   fail one by one.
 
@@ -280,7 +292,10 @@ GET  /healthz   GET /readyz   GET /metrics   GET /openapi.yaml
   per test. `make test-isolated` gives every test its own container again,
   to check that no test passes only because the server is shared.
 - golangci-lint v2: default linters plus `bodyclose`, `noctx`, `errorlint`,
-  `gosec`, `misspell`. Formatters `gofumpt` and `goimports`.
+  `gosec`, `misspell`. Formatters `gofumpt` and `goimports`. The gosec
+  check for weak random numbers (G404) is off in `internal/worker/worker.go`.
+  Reason: the retry delay only spreads retries out, so `math/rand/v2` is
+  enough, and `crypto/rand` would add an error path.
 - oapi-codegen, sqlc and golangci-lint are each pinned as a `tool` in a
   module of their own, `tools/<name>/go.mod`, so their dependencies stay
   out of the app's `go.mod`. Make targets hide the `-modfile` flag. CI

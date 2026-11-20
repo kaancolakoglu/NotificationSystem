@@ -240,7 +240,31 @@ func (s *server) GetNotification(ctx context.Context, request GetNotificationReq
 	if err != nil {
 		return nil, err
 	}
-	return GetNotification200JSONResponse(notification), nil
+	attempts, err := s.queries.ListDeliveryAttempts(ctx, request.Id)
+	if err != nil {
+		return nil, fmt.Errorf("list delivery attempts: %w", err)
+	}
+	deliveryAttempts := make([]DeliveryAttempt, len(attempts))
+	for i, attempt := range attempts {
+		deliveryAttempts[i] = DeliveryAttempt{
+			Attempt:   int(attempt.Attempt),
+			Error:     textPointer(attempt.Error),
+			CreatedAt: attempt.CreatedAt,
+		}
+	}
+	return GetNotification200JSONResponse{
+		Id:               notification.Id,
+		Recipient:        notification.Recipient,
+		Channel:          notification.Channel,
+		Content:          notification.Content,
+		Priority:         notification.Priority,
+		Status:           notification.Status,
+		CreatedAt:        notification.CreatedAt,
+		BatchId:          notification.BatchId,
+		Attempts:         notification.Attempts,
+		LastError:        notification.LastError,
+		DeliveryAttempts: deliveryAttempts,
+	}, nil
 }
 
 func (s *server) CancelNotification(ctx context.Context, request CancelNotificationRequestObject) (CancelNotificationResponseObject, error) {
@@ -503,7 +527,16 @@ func toNotification(row store.Notification) (Notification, error) {
 		Status:    Status(row.Status),
 		CreatedAt: row.CreatedAt,
 		BatchId:   batchID,
+		Attempts:  int(row.Attempts),
+		LastError: textPointer(row.LastError),
 	}, nil
+}
+
+func textPointer(text pgtype.Text) *string {
+	if !text.Valid {
+		return nil
+	}
+	return &text.String
 }
 
 func requestError(err error) (int, string) {

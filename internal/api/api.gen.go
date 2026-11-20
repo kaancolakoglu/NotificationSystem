@@ -137,6 +137,18 @@ type CreateNotificationRequest struct {
 	Recipient string    `json:"recipient"`
 }
 
+// DeliveryAttempt defines model for DeliveryAttempt.
+type DeliveryAttempt struct {
+	// Attempt Number of the attempt, from 1.
+	Attempt int `json:"attempt"`
+
+	// CreatedAt When the result of the attempt was stored.
+	CreatedAt time.Time `json:"created_at"`
+
+	// Error Present when the attempt failed.
+	Error *string `json:"error,omitempty"`
+}
+
 // Error defines model for Error.
 type Error struct {
 	Message string `json:"message"`
@@ -144,15 +156,43 @@ type Error struct {
 
 // Notification defines model for Notification.
 type Notification struct {
+	// Attempts How many times a worker has taken the notification to send it. An attempt in progress is counted.
+	Attempts int `json:"attempts"`
+
 	// BatchId Present when the notification was created in a batch.
 	BatchId   *openapi_types.UUID `json:"batch_id,omitempty"`
 	Channel   Channel             `json:"channel"`
 	Content   string              `json:"content"`
 	CreatedAt time.Time           `json:"created_at"`
 	Id        openapi_types.UUID  `json:"id"`
-	Priority  Priority            `json:"priority"`
-	Recipient string              `json:"recipient"`
-	Status    Status              `json:"status"`
+
+	// LastError Why the last failed attempt failed. It stays after a later attempt succeeds.
+	LastError *string  `json:"last_error,omitempty"`
+	Priority  Priority `json:"priority"`
+	Recipient string   `json:"recipient"`
+	Status    Status   `json:"status"`
+}
+
+// NotificationDetail defines model for NotificationDetail.
+type NotificationDetail struct {
+	// Attempts How many times a worker has taken the notification to send it. An attempt in progress is counted.
+	Attempts int `json:"attempts"`
+
+	// BatchId Present when the notification was created in a batch.
+	BatchId   *openapi_types.UUID `json:"batch_id,omitempty"`
+	Channel   Channel             `json:"channel"`
+	Content   string              `json:"content"`
+	CreatedAt time.Time           `json:"created_at"`
+
+	// DeliveryAttempts Oldest first. An attempt appears once its result is stored.
+	DeliveryAttempts []DeliveryAttempt  `json:"delivery_attempts"`
+	Id               openapi_types.UUID `json:"id"`
+
+	// LastError Why the last failed attempt failed. It stays after a later attempt succeeds.
+	LastError *string  `json:"last_error,omitempty"`
+	Priority  Priority `json:"priority"`
+	Recipient string   `json:"recipient"`
+	Status    Status   `json:"status"`
 }
 
 // NotificationList defines model for NotificationList.
@@ -222,7 +262,7 @@ type ServerInterface interface {
 	// CreateBatch Create up to 1000 notifications
 	// (POST /v1/notifications/batch)
 	CreateBatch(w http.ResponseWriter, r *http.Request, params CreateBatchParams)
-	// GetNotification Get a notification by id
+	// GetNotification Get a notification by id, with its delivery attempts
 	// (GET /v1/notifications/{id})
 	GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
 	// CancelNotification Cancel a pending notification
@@ -948,7 +988,7 @@ type GetNotificationResponseObject interface {
 	VisitGetNotificationResponse(w http.ResponseWriter) error
 }
 
-type GetNotification200JSONResponse Notification
+type GetNotification200JSONResponse NotificationDetail
 
 func (response GetNotification200JSONResponse) VisitGetNotificationResponse(w http.ResponseWriter) error {
 
@@ -1096,7 +1136,7 @@ type StrictServerInterface interface {
 	// CreateBatch Create up to 1000 notifications
 	// (POST /v1/notifications/batch)
 	CreateBatch(ctx context.Context, request CreateBatchRequestObject) (CreateBatchResponseObject, error)
-	// GetNotification Get a notification by id
+	// GetNotification Get a notification by id, with its delivery attempts
 	// (GET /v1/notifications/{id})
 	GetNotification(ctx context.Context, request GetNotificationRequestObject) (GetNotificationResponseObject, error)
 	// CancelNotification Cancel a pending notification

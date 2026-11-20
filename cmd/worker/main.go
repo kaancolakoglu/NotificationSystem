@@ -21,6 +21,7 @@ const (
 	poolSize        = 20
 	pollInterval    = 200 * time.Millisecond
 	databaseTimeout = 5 * time.Second
+	backoffBase     = time.Second
 )
 
 var channels = []string{"sms", "email", "push"}
@@ -67,6 +68,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL stri
 				Size:         poolSize,
 				Interval:     pollInterval,
 				QueryTimeout: timeout,
+				BackoffBase:  backoffBase,
 			}.Run(ctx)
 		})
 	}
