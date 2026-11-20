@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -38,7 +39,7 @@ func TestRunRejectsABadProviderURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", "redis://127.0.0.1:1", tt.providerURL, time.Second)
+			err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", "redis://127.0.0.1:1", tt.providerURL, "127.0.0.1:0", time.Second)
 
 			if err == nil || !strings.Contains(err.Error(), "PROVIDER_URL") {
 				t.Errorf("error = %v, want one about PROVIDER_URL", err)
@@ -49,7 +50,7 @@ func TestRunRejectsABadProviderURL(t *testing.T) {
 
 func TestRunRejectsABadRedisURL(t *testing.T) {
 	for _, redisURL := range []string{"", "http://redis:6379", "redis://redis:port", "redis://redis:6379/first"} {
-		err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", redisURL, "http://fakeprovider:8081/", time.Second)
+		err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", redisURL, "http://fakeprovider:8081/", "127.0.0.1:0", time.Second)
 
 		if err == nil || !strings.Contains(err.Error(), "REDIS_URL") {
 			t.Errorf("REDIS_URL %q: error = %v, want one about REDIS_URL", redisURL, err)
@@ -77,7 +78,7 @@ func TestRunStopsWhenTheDatabaseNeverAnswers(t *testing.T) {
 		}
 	})
 
-	err = run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@"+listener.Addr().String()+"/postgres?sslmode=disable", "redis://127.0.0.1:1", "http://fakeprovider:8081/", 200*time.Millisecond)
+	err = run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@"+listener.Addr().String()+"/postgres?sslmode=disable", "redis://127.0.0.1:1", "http://fakeprovider:8081/", "127.0.0.1:0", 200*time.Millisecond)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error = %v, want a deadline exceeded error", err)
@@ -111,7 +112,7 @@ func TestRunKeepsTheProviderLimit(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() {
-		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, 5*time.Second)
+		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, "127.0.0.1:0", 5*time.Second)
 	}()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
@@ -169,7 +170,7 @@ func TestRunLetsASendInFlightFinishAfterItIsToldToStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() {
-		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, 5*time.Second)
+		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, "127.0.0.1:0", 5*time.Second)
 	}()
 	select {
 	case <-arrived:
@@ -224,7 +225,7 @@ func TestRunRetriesFailedSendsAfterTheBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() {
-		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, 5*time.Second)
+		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, "127.0.0.1:0", 5*time.Second)
 	}()
 	deadline := time.Now().Add(20 * time.Second)
 	for _, id := range ids {
@@ -271,6 +272,145 @@ func TestRunRetriesFailedSendsAfterTheBackoff(t *testing.T) {
 	}
 }
 
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	var config net.ListenConfig
+	listener, err := config.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+	return listener.Addr().String()
+}
+
+func scrape(t *testing.T, addr string) (string, error) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+"/metrics", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close response: %v", err)
+		}
+	}()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body %s", response.StatusCode, http.StatusOK, body)
+	}
+	return string(body), nil
+}
+
+func TestRunServesTheWorkerMetrics(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(provider.Close)
+	row, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{ID: uuid.Must(uuid.NewV7()), Recipient: "+905551234567", Channel: "sms", Content: "hello", Priority: 1})
+	if err != nil {
+		t.Fatalf("insert notification: %v", err)
+	}
+	lost, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{ID: uuid.Must(uuid.NewV7()), Recipient: "user@example.com", Channel: "email", Content: "hello", Priority: 1})
+	if err != nil {
+		t.Fatalf("insert notification: %v", err)
+	}
+	if _, err := db.Exec(t.Context(), "UPDATE notifications SET status = 'processing', attempts = 5, locked_until = now() - interval '1 second' WHERE id = $1", lost.ID); err != nil {
+		t.Fatalf("give the notification an expired lease: %v", err)
+	}
+
+	redisOptions := testredis.New(t).Options()
+	redisURL := fmt.Sprintf("redis://%s/%d", redisOptions.Addr, redisOptions.DB)
+	addr := freeAddr(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, addr, 5*time.Second)
+	}()
+	deadline := time.Now().Add(40 * time.Second)
+	for id, want := range map[uuid.UUID]string{row.ID: "sent", lost.ID: "failed"} {
+		for {
+			stored, err := queries.GetNotification(t.Context(), id)
+			if err != nil {
+				t.Fatalf("get notification: %v", err)
+			}
+			if stored.Status == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s notification is %s, want %s", stored.Channel, stored.Status, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	var metrics string
+	for !strings.Contains(metrics, `notifications_sent_total{channel="sms"} 1`) || !strings.Contains(metrics, `notifications_failed_total{channel="email"} 1`) {
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+		if metrics, err = scrape(t, addr); err != nil {
+			t.Fatalf("scrape the worker: %v", err)
+		}
+	}
+	for _, line := range []string{
+		`notifications_sent_total{channel="sms"} 1`,
+		`notifications_sent_total{channel="email"} 0`,
+		`notifications_failed_total{channel="email"} 1`,
+		`notifications_retried_total{channel="push"} 0`,
+		`rate_limiter_failures_total{channel="sms"} 0`,
+		`provider_call_duration_seconds_count{channel="sms"} 1`,
+		`notification_delivery_duration_seconds_count{channel="sms"} 1`,
+		`circuit_breaker_state{channel="push"} 0`,
+	} {
+		if !strings.Contains(metrics, "\n"+line+"\n") {
+			t.Errorf("metrics have no line %q", line)
+		}
+	}
+	if !strings.Contains(metrics, "\ngo_goroutines ") {
+		t.Error("metrics have no Go runtime series")
+	}
+
+	cancel()
+	if err := <-stopped; err != nil {
+		t.Errorf("run returned %v after it was told to stop, want no error", err)
+	}
+	if _, err := scrape(t, addr); err == nil {
+		t.Error("the metrics server still answers after run returned, want it closed")
+	}
+}
+
+func TestRunFailsWhenTheMetricsAddressIsTaken(t *testing.T) {
+	db := testdb.New(t)
+	var config net.ListenConfig
+	listener, err := config.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("close listener: %v", err)
+		}
+	})
+
+	err = run(t.Context(), slog.New(slog.DiscardHandler), db.Config().ConnString(), "redis://127.0.0.1:1", "http://fakeprovider:8081/", listener.Addr().String(), time.Second)
+
+	if err == nil || !strings.Contains(err.Error(), "listen for metrics") {
+		t.Errorf("error = %v, want one about listening for metrics", err)
+	}
+}
+
 type syncBuffer struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
@@ -299,7 +439,7 @@ func TestRunLogsJSONLinesWithTheWorkerAndTheCorrelationID(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() {
-		stopped <- run(ctx, obs.NewLogger(&logs).With("worker", "worker-1"), db.Config().ConnString(), "redis://127.0.0.1:1", "http://127.0.0.1:1/", 5*time.Second)
+		stopped <- run(ctx, obs.NewLogger(&logs).With("worker", "worker-1"), db.Config().ConnString(), "redis://127.0.0.1:1", "http://127.0.0.1:1/", "127.0.0.1:0", 5*time.Second)
 	}()
 	deadline := time.Now().Add(20 * time.Second)
 	for !strings.Contains(logs.String(), `"msg":"rate limiter failed, releasing the notification"`) {
@@ -365,7 +505,7 @@ func TestRunSendsANotificationOnEveryChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() {
-		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, 5*time.Second)
+		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, "127.0.0.1:0", 5*time.Second)
 	}()
 
 	deadline := time.Now().Add(20 * time.Second)

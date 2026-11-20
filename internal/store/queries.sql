@@ -141,3 +141,13 @@ SELECT id, channel, status, attempts, correlation_id FROM swept;
 SELECT attempt, error, created_at FROM delivery_attempts
 WHERE notification_id = $1
 ORDER BY attempt;
+
+-- name: CountPendingNotifications :many
+SELECT
+    channel,
+    priority,
+    count(*) AS pending,
+    extract(epoch FROM greatest(now() - min(next_attempt_at), interval '0'))::float8 AS oldest_age_seconds
+FROM notifications
+WHERE status = 'pending'
+GROUP BY channel, priority;

@@ -219,7 +219,7 @@ func TestStaleReleaseChangesNothing(t *testing.T) {
 	}
 	stale := claim()
 	hold(t, db, created.ID, stale.Attempts, "-1 second")
-	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), QueryTimeout: queryTimeout}.sweep(t.Context())
+	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), QueryTimeout: queryTimeout}.sweep(t.Context())
 	swept := get(t, queries, created.ID)
 
 	pool.release(t.Context(), stale, slog.LevelError, "releasing the notification", errors.New("redis is down"))

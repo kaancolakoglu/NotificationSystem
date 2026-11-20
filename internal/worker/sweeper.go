@@ -14,6 +14,7 @@ const leaseExpired = "lease expired before a result was stored"
 type Sweeper struct {
 	Queries      *store.Queries
 	Logger       *slog.Logger
+	Metrics      *obs.WorkerMetrics
 	Interval     time.Duration
 	QueryTimeout time.Duration
 }
@@ -46,6 +47,9 @@ func (s Sweeper) sweep(ctx context.Context) {
 		level := slog.LevelWarn
 		if notification.Status == "failed" {
 			level = slog.LevelError
+			s.Metrics.Failed(notification.Channel)
+		} else {
+			s.Metrics.Retried(notification.Channel)
 		}
 		s.Logger.Log(obs.WithCorrelationID(ctx, notification.CorrelationID.String), level, "lease expired", "channel", notification.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", notification.Status)
 	}

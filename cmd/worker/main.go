@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
@@ -23,6 +26,8 @@ import (
 )
 
 const (
+	metricsAddr       = ":8082"
+	readHeaderTimeout = 5 * time.Second
 	poolSize          = 20
 	pollInterval      = 200 * time.Millisecond
 	databaseTimeout   = 5 * time.Second
@@ -49,14 +54,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	if err := run(ctx, logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("PROVIDER_URL"), databaseTimeout); err != nil {
+	if err := run(ctx, logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("PROVIDER_URL"), metricsAddr, databaseTimeout); err != nil {
 		logger.Error("worker exited", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("worker stopped")
 }
 
-func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, providerURL string, timeout time.Duration) error {
+func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, providerURL, metricsAddr string, timeout time.Duration) error {
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is not set")
 	}
@@ -89,6 +94,14 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 		}
 	}()
 
+	registry := obs.NewRegistry()
+	metrics := obs.NewWorkerMetrics(registry, channels)
+	stopMetrics, err := serveMetrics(ctx, logger, metricsAddr, registry)
+	if err != nil {
+		return err
+	}
+	defer stopMetrics()
+
 	queries := store.New(pool)
 	limiter := ratelimit.New(redisClient, sendsPerSecond, sendBurst)
 	client := provider.New(providerURL, len(channels)*poolSize, logger)
@@ -100,6 +113,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 				Provider:        client,
 				Limiter:         limiter,
 				Logger:          logger,
+				Metrics:         metrics,
 				Channel:         channel,
 				Size:            poolSize,
 				Interval:        pollInterval,
@@ -114,6 +128,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 		worker.Sweeper{
 			Queries:      queries,
 			Logger:       logger,
+			Metrics:      metrics,
 			Interval:     sweepInterval,
 			QueryTimeout: timeout,
 		}.Run(ctx)
@@ -131,6 +146,34 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 	logger.InfoContext(ctx, "worker is stopping, waiting for the sends in flight")
 	loops.Wait()
 	return nil
+}
+
+func serveMetrics(ctx context.Context, logger *slog.Logger, addr string, registry *prometheus.Registry) (stop func(), err error) {
+	var config net.ListenConfig
+	listener, err := config.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for metrics on %s: %w", addr, err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", obs.MetricsHandler(registry, logger))
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			logger.ErrorContext(ctx, "metrics server stopped", "error", err)
+		}
+	}()
+	return func() {
+		if err := server.Close(); err != nil {
+			logger.ErrorContext(ctx, "close metrics server", "error", err)
+		}
+		<-stopped
+	}, nil
 }
 
 func checkProviderURL(providerURL string) error {

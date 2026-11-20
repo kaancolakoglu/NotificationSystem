@@ -31,6 +31,7 @@ type Pool struct {
 	Provider        *provider.Client
 	Limiter         *ratelimit.Limiter
 	Logger          *slog.Logger
+	Metrics         *obs.WorkerMetrics
 	Channel         string
 	Size            int32
 	Interval        time.Duration
@@ -68,6 +69,7 @@ func (p Pool) Run(ctx context.Context) {
 					p.release(notificationCtx, notification, slog.LevelInfo, "worker is stopping, releasing the notification", err)
 				default:
 					limiterDown.Store(true)
+					p.Metrics.LimiterFailed(p.Channel)
 					p.release(notificationCtx, notification, slog.LevelError, "rate limiter failed, releasing the notification", err)
 				}
 				busy.Add(-1)
@@ -104,6 +106,7 @@ func (p Pool) Run(ctx context.Context) {
 					continue
 				}
 				if err != nil {
+					p.Metrics.LimiterFailed(p.Channel)
 					p.Logger.ErrorContext(ctx, "rate limiter still fails, not claiming", "channel", p.Channel, "error", err)
 					continue
 				}
@@ -131,6 +134,7 @@ func (p Pool) newBreaker(ctx context.Context) *gobreaker.CircuitBreaker[string] 
 			return errors.Is(err, context.Canceled)
 		},
 		OnStateChange: func(_ string, from, to gobreaker.State) {
+			p.Metrics.BreakerChanged(p.Channel, int(to))
 			p.Logger.WarnContext(ctx, "circuit breaker changed state", "channel", p.Channel, "from", from.String(), "to", to.String())
 		},
 	})
@@ -171,11 +175,14 @@ func (p Pool) release(ctx context.Context, notification store.Notification, leve
 
 func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string], notification store.Notification) {
 	messageID, sendErr := breaker.Execute(func() (string, error) {
-		return p.Provider.Send(ctx, notification.ID, provider.Message{
+		started := time.Now()
+		messageID, err := p.Provider.Send(ctx, notification.ID, provider.Message{
 			To:      notification.Recipient,
 			Channel: notification.Channel,
 			Content: notification.Content,
 		})
+		p.Metrics.ProviderCalled(p.Channel, time.Since(started))
+		return messageID, err
 	})
 	if errors.Is(sendErr, gobreaker.ErrOpenState) || errors.Is(sendErr, gobreaker.ErrTooManyRequests) {
 		p.release(ctx, notification, slog.LevelError, "circuit breaker refused the call, releasing the notification", sendErr)
@@ -189,7 +196,9 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 			Attempts:          notification.Attempts,
 			ProviderMessageID: pgtype.Text{String: messageID, Valid: messageID != ""},
 		})
-		p.checkWrite(ctx, notification, "sent", messageID, changed, err)
+		if p.checkWrite(ctx, notification, "sent", messageID, changed, err) {
+			p.Metrics.Sent(p.Channel, time.Since(notification.CreatedAt))
+		}
 		return
 	}
 
@@ -197,7 +206,9 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 	if !errors.As(sendErr, &failure) || !failure.Retryable || notification.Attempts >= maxAttempts {
 		p.Logger.ErrorContext(ctx, "send notification", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", "failed", "error", sendErr)
 		changed, err := p.Queries.MarkFailed(queryCtx, store.MarkFailedParams{ID: notification.ID, Attempts: notification.Attempts, Error: sendErr.Error()})
-		p.checkWrite(ctx, notification, "failed", "", changed, err)
+		if p.checkWrite(ctx, notification, "failed", "", changed, err) {
+			p.Metrics.Failed(p.Channel)
+		}
 		return
 	}
 	delay := retryDelay(p.BackoffBase, notification.Attempts, failure.RetryAfter)
@@ -208,19 +219,23 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 		Error:    sendErr.Error(),
 		Delay:    pgtype.Interval{Microseconds: delay.Microseconds(), Valid: true},
 	})
-	p.checkWrite(ctx, notification, "pending", "", changed, err)
+	if p.checkWrite(ctx, notification, "pending", "", changed, err) {
+		p.Metrics.Retried(p.Channel)
+	}
 }
 
 func retryDelay(base time.Duration, attempts int16, retryAfter time.Duration) time.Duration {
 	return max(rand.N(base<<attempts), retryAfter)
 }
 
-func (p Pool) checkWrite(ctx context.Context, notification store.Notification, status, messageID string, changed int64, err error) {
+func (p Pool) checkWrite(ctx context.Context, notification store.Notification, status, messageID string, changed int64, err error) (stored bool) {
 	if err != nil {
 		p.Logger.ErrorContext(ctx, "write result", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID, "error", err)
-		return
+		return false
 	}
 	if changed == 0 {
 		p.Logger.ErrorContext(ctx, "result not written, this attempt no longer holds the notification", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID)
+		return false
 	}
+	return true
 }

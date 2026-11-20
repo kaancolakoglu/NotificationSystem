@@ -185,6 +185,9 @@ func unlimited(t *testing.T) *ratelimit.Limiter {
 
 func runSweeper(t *testing.T, sweeper Sweeper) {
 	t.Helper()
+	if sweeper.Metrics == nil {
+		sweeper.Metrics = unreadMetrics()
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -195,6 +198,9 @@ func runSweeper(t *testing.T, sweeper Sweeper) {
 
 func runPool(t *testing.T, pool Pool) (stop context.CancelFunc, stopped <-chan struct{}) {
 	t.Helper()
+	if pool.Metrics == nil {
+		pool.Metrics = unreadMetrics()
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -667,7 +673,7 @@ func TestResultForARowThatIsNotProcessingIsLogged(t *testing.T) {
 	queries := store.New(db)
 	_, client := newProvider(t, accept)
 	var logs bytes.Buffer
-	pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
+	pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: unreadMetrics(), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
 	pending := insert(t, queries, "sms", 1)
 
 	pool.send(t.Context(), pool.newBreaker(t.Context()), pending)
@@ -823,7 +829,7 @@ func TestExpiredLeaseBeforeTheLastAttemptGoesBackToPending(t *testing.T) {
 	lost := insert(t, queries, "sms", 1)
 	hold(t, db, lost.ID, maxAttempts-1, "-1 second")
 
-	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(t.Context())
+	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(t.Context())
 
 	if stored := get(t, queries, lost.ID); stored.Status != "pending" || stored.Attempts != maxAttempts-1 {
 		t.Errorf("status = %q, attempts = %d, want pending and %d, with one attempt left", stored.Status, stored.Attempts, maxAttempts-1)
@@ -846,7 +852,8 @@ func TestStaleResultWriteChangesNothing(t *testing.T) {
 			queries := store.New(db)
 			_, client := newProvider(t, tt.answer)
 			var logs bytes.Buffer
-			pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
+			metrics, reader := newMetrics()
+			pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: metrics, Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
 			created := insert(t, queries, "sms", 1)
 			claim := func() store.Notification {
 				t.Helper()
@@ -858,7 +865,7 @@ func TestStaleResultWriteChangesNothing(t *testing.T) {
 			}
 			stale := claim()
 			hold(t, db, created.ID, stale.Attempts, "-1 second")
-			Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), QueryTimeout: queryTimeout}.sweep(t.Context())
+			Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), QueryTimeout: queryTimeout}.sweep(t.Context())
 			current := claim()
 			if stale.Attempts != 1 || current.Attempts != 2 {
 				t.Fatalf("attempts of the two claims = %d and %d, want 1 and 2", stale.Attempts, current.Attempts)
@@ -871,6 +878,17 @@ func TestStaleResultWriteChangesNothing(t *testing.T) {
 			}
 			if history := attempts(t, queries, created.ID); len(history) != 1 || history[0].Error.String != leaseExpired {
 				t.Errorf("delivery attempts = %+v, want only the expired one", history)
+			}
+			for series, want := range map[string]float64{
+				`notifications_sent_total{channel="sms"}`:                     0,
+				`notifications_failed_total{channel="sms"}`:                   0,
+				`notifications_retried_total{channel="sms"}`:                  0,
+				`notification_delivery_duration_seconds_count{channel="sms"}`: 0,
+				`provider_call_duration_seconds_count{channel="sms"}`:         1,
+			} {
+				if got := reader.value(t, series); got != want {
+					t.Errorf("%s = %v, want %v: a result that is not stored is not counted", series, got, want)
+				}
 			}
 			for _, want := range []string{`"msg":"result not written, this attempt no longer holds the notification"`, `"channel":"sms"`, `"notification_id":"` + created.ID.String() + `"`, `"attempt":1`, `"status":"` + tt.wantStatus + `"`} {
 				if !strings.Contains(logs.String(), want) {

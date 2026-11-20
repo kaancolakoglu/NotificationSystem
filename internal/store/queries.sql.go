@@ -140,6 +140,49 @@ func (q *Queries) CountBatchByStatus(ctx context.Context, batchID pgtype.UUID) (
 	return i, err
 }
 
+const countPendingNotifications = `-- name: CountPendingNotifications :many
+SELECT
+    channel,
+    priority,
+    count(*) AS pending,
+    extract(epoch FROM greatest(now() - min(next_attempt_at), interval '0'))::float8 AS oldest_age_seconds
+FROM notifications
+WHERE status = 'pending'
+GROUP BY channel, priority
+`
+
+type CountPendingNotificationsRow struct {
+	Channel          string
+	Priority         int16
+	Pending          int64
+	OldestAgeSeconds float64
+}
+
+func (q *Queries) CountPendingNotifications(ctx context.Context) ([]CountPendingNotificationsRow, error) {
+	rows, err := q.db.Query(ctx, countPendingNotifications)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountPendingNotificationsRow
+	for rows.Next() {
+		var i CountPendingNotificationsRow
+		if err := rows.Scan(
+			&i.Channel,
+			&i.Priority,
+			&i.Pending,
+			&i.OldestAgeSeconds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const deleteExpiredIdempotencyKeys = `-- name: DeleteExpiredIdempotencyKeys :execrows
 DELETE FROM idempotency_keys
 WHERE key = ANY (ARRAY(

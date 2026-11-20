@@ -71,7 +71,7 @@ These are settled. Raise it before changing one.
   library router. Spec at `api/openapi.yaml`. The spec covers `/v1` only.
   `/healthz`, `/readyz`, `/metrics` and `/openapi.yaml` are plain routes on
   the API's mux: the first three serve operators, the last is the spec
-  itself.
+  itself. The worker serves `/metrics` only, on port 8082.
 - Postgres through `pgx/v5` and `pgxpool`. Queries with sqlc in pgx/v5 mode.
 - Migrations: goose SQL files in `migrations/`, applied by `cmd/migrate`
   using goose as a library with embedded files. A run holds a Postgres
@@ -329,7 +329,7 @@ These are settled. Raise it before changing one.
   carry the id of the request that created it, the provider client's
   lines included. A row with a null id is logged without one. The API
   logs one line per `/v1` request: method, path, status and duration.
-  Routes outside `/v1` are not logged and get no id. Reason: compose
+  Routes outside `/v1` get no request line and no id. Reason: compose
   calls `/healthz` every 2 s. Every worker line has `worker`, the host
   name. Reason: with several workers the lines of one can be told apart.
   A failed send logs what happens next: `status` `pending` with
@@ -344,6 +344,55 @@ These are settled. Raise it before changing one.
   API's HTTP server itself, such as a handler that panicked, are JSON
   lines at error level, without a correlation id. Reason: it printed
   plain text to stderr too.
+- Worker metrics: every series has a `channel` label and exists at 0 from
+  the start, for every channel. Reason: `increase()` cannot see the first
+  event of a series that did not exist before it.
+  - `notifications_sent_total`, `notifications_failed_total` and
+    `notifications_retried_total` count stored results. `retried` is a
+    failed or lost attempt whose row went back to `pending`. A sender
+    counts after its result write, and only if the write changed the row.
+    The sweeper counts each row it moves. A released row is not counted.
+    Reason: counted before the write, a result that was not stored was
+    counted again when the sweeper took the row. The cost: a write that
+    timed out but still finished on the server is not counted.
+  - `provider_call_duration_seconds`: histogram of every provider call,
+    whatever its result. A call the breaker refused is not a call.
+  - `notification_delivery_duration_seconds`: histogram of the worker's
+    time when the `sent` result was stored, minus `created_at`, which the
+    database set. So it includes the retry delays, and any difference
+    between the two clocks. Buckets from 0.1 s to 1 hour.
+  - `circuit_breaker_state`: 0 closed, 1 half-open, 2 open. Each worker
+    reports its own breaker.
+  - `rate_limiter_failures_total`: limiter calls that failed. That
+    includes the pool's own check at each poll, so with Redis down it
+    grows by about 5 a second per channel in each worker.
+- Queue metrics: the API reports `notifications_pending` and
+  `notifications_oldest_pending_age_seconds`, by `channel` and `priority`,
+  0 for an empty queue. Reason for the API: the queue stays visible when
+  no worker runs. The count includes rows that are not due yet. The age
+  is the time since the earliest `next_attempt_at` among the pending
+  rows, 0 if that is in the future. Reason: it says how far behind the
+  workers are, and a row waiting for its retry is not late. Both come
+  from one query at each scrape, read from the claim index. Measured with
+  5 million pending rows: 0.2 s after a vacuum, 1 s before. The query
+  gets 5 s. If it fails, the scrape answers with every other series, the
+  error is logged, and `promhttp_metric_handler_errors_total` counts it.
+- Both `/metrics` endpoints include the Go runtime and process series.
+  Reason: memory, goroutines and open files are the first things to look
+  at under load. Compose does not publish the worker's port. Reason:
+  several workers cannot share one host port. The worker exits at start
+  if it cannot listen on the port. If its metrics server stops later, the
+  worker logs that and keeps sending.
+- Readiness: `GET /readyz` on the API pings Postgres, then Redis, each
+  within 1 s. 200 if both answer, else 503 and an error line that names
+  the first one that failed. Reason for Redis: without it nothing is
+  sent. The cost: the API reports not ready although it can still accept
+  requests. A ping goes on when the caller gives up. Reason: cut off, it
+  was logged as a failed dependency. The API's Redis client obeys the
+  deadline of a call (`ContextTimeoutEnabled`). Reason: by default
+  go-redis waits 3 s for an answer whatever the deadline. Besides this
+  ping the API does not use Redis. It starts without Redis and exits only
+  if `REDIS_URL` does not parse.
 
 ## Design reference
 
