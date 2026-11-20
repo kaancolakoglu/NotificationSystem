@@ -31,6 +31,16 @@ services:
     ports:
       - "16686:16686"
 
+  swagger-ui:
+    image: swaggerapi/swagger-ui:v5.34.1
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+      SUPPORTED_SUBMIT_METHODS: "[]"
+    volumes:
+      - ./api/openapi.yaml:/spec/openapi.yaml:ro
+    ports:
+      - "8081:8080"
+
   migrate:
     build: .
     command: ["migrate"]

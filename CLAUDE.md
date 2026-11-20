@@ -72,6 +72,12 @@ These are settled. Raise it before changing one.
   `/healthz`, `/readyz`, `/metrics` and `/openapi.yaml` are plain routes on
   the API's mux: the first three serve operators, the last is the spec
   itself. The worker serves `/metrics` only, on port 8082.
+- API documentation: compose runs Swagger UI (`swaggerapi/swagger-ui`)
+  at `localhost:8081`, with `api/openapi.yaml` mounted into it. Its "Try
+  it out" button is off (`SUPPORTED_SUBMIT_METHODS` is empty). Reason:
+  the spec has no `servers` entry, so the page would send a request to
+  itself. And the API sends no CORS headers and answers a preflight
+  request with 405, so a browser would block a request to the API.
 - WebSocket: `coder/websocket`. The two stream endpoints are in the spec
   for documentation and are left out of the generated server
   (`exclude-operation-ids`). They are plain handlers on the `/v1` mux.
