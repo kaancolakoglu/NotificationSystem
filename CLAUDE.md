@@ -174,7 +174,9 @@ These are settled. Raise it before changing one.
   `Idempotency-Key: <notification id>`, timeout 5 s. Success is 202. A 202
   whose body has no readable `messageId` is still a success, and is logged.
   Reason: the provider has accepted it, so failing it would report it wrong
-  and retrying would send it twice.
+  and retrying would send it twice. A `messageId` with a NUL character
+  counts as not readable. Reason: Postgres text cannot store one, so the
+  result write failed and the notification was sent again.
 - The error of a failed call is stored in `last_error` and shown by the API.
   For an answer that is not 202 it holds the status and the first 200 bytes
   of the answer, without NUL characters, with invalid UTF-8 replaced and

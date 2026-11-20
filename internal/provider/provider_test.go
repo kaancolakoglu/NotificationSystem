@@ -370,6 +370,7 @@ func TestSendAcceptedWithoutMessageID(t *testing.T) {
 		{name: "not JSON", body: "accepted"},
 		{name: "no messageId", body: `{"status":"accepted"}`},
 		{name: "messageId is not a string", body: `{"messageId":5}`},
+		{name: "messageId with a NUL character", body: `{"messageId":"message\u00001"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

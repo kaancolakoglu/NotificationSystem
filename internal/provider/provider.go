@@ -107,6 +107,9 @@ func (c *Client) Send(ctx context.Context, id uuid.UUID, message Message) (strin
 	if err == nil && accepted.MessageID == "" {
 		err = errors.New("messageId is missing")
 	}
+	if strings.Contains(accepted.MessageID, "\x00") {
+		accepted.MessageID, err = "", errors.New("messageId contains a NUL character")
+	}
 	if err != nil {
 		c.logger.WarnContext(ctx, "provider accepted the notification without a readable message id", "notification_id", id, "error", err)
 	}

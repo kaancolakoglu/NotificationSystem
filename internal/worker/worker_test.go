@@ -296,6 +296,28 @@ func TestCreatedRowIsSent(t *testing.T) {
 	}
 }
 
+func TestAcceptedNotificationIsSentWhenItsMessageIDCannotBeStored(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	fake, client := newProvider(t, func(w http.ResponseWriter) error {
+		w.WriteHeader(http.StatusAccepted)
+		_, err := io.WriteString(w, `{"messageId":"message\u00001"}`)
+		return err
+	})
+	created := insert(t, queries, "sms", 1)
+
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	waitFor(t, "the notification is sent", func() bool { return get(t, queries, created.ID).Status == "sent" })
+	time.Sleep(10 * pollInterval)
+
+	if stored := get(t, queries, created.ID); stored.Attempts != 1 || stored.ProviderMessageID.Valid {
+		t.Errorf("attempts = %d, provider message id = %+v, want 1 and none", stored.Attempts, stored.ProviderMessageID)
+	}
+	if calls := len(fake.keys()); calls != 1 {
+		t.Errorf("provider got %d requests, want 1", calls)
+	}
+}
+
 func TestPermanentFailureIsNotRetried(t *testing.T) {
 	const failure = "provider answered 400, want 202"
 	db := testdb.New(t)
