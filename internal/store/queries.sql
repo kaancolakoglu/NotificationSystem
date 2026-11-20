@@ -24,7 +24,11 @@ WHERE key = $1;
 
 -- name: DeleteExpiredIdempotencyKeys :execrows
 DELETE FROM idempotency_keys
-WHERE created_at < now() - interval '24 hours';
+WHERE key = ANY (ARRAY(
+    SELECT expired.key FROM idempotency_keys AS expired
+    WHERE expired.created_at < now() - interval '24 hours'
+    LIMIT sqlc.arg('row_limit')
+));
 
 -- name: InsertBatchNotifications :copyfrom
 INSERT INTO notifications (id, recipient, channel, content, priority, batch_id)

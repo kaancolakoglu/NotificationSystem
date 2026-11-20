@@ -140,11 +140,15 @@ func (q *Queries) CountBatchByStatus(ctx context.Context, batchID pgtype.UUID) (
 
 const deleteExpiredIdempotencyKeys = `-- name: DeleteExpiredIdempotencyKeys :execrows
 DELETE FROM idempotency_keys
-WHERE created_at < now() - interval '24 hours'
+WHERE key = ANY (ARRAY(
+    SELECT expired.key FROM idempotency_keys AS expired
+    WHERE expired.created_at < now() - interval '24 hours'
+    LIMIT $1
+))
 `
 
-func (q *Queries) DeleteExpiredIdempotencyKeys(ctx context.Context) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteExpiredIdempotencyKeys)
+func (q *Queries) DeleteExpiredIdempotencyKeys(ctx context.Context, rowLimit int32) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredIdempotencyKeys, rowLimit)
 	if err != nil {
 		return 0, err
 	}

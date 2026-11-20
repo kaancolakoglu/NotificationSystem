@@ -24,6 +24,7 @@ const (
 	backoffBase       = time.Second
 	sweepInterval     = 15 * time.Second
 	keyExpiryInterval = time.Minute
+	keyExpiryMaxKeys  = 100_000
 )
 
 var channels = []string{"sms", "email", "push"}
@@ -88,6 +89,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL stri
 			Logger:       logger,
 			Interval:     keyExpiryInterval,
 			QueryTimeout: timeout,
+			MaxKeys:      keyExpiryMaxKeys,
 		}.Run(ctx)
 	})
 	loops.Wait()

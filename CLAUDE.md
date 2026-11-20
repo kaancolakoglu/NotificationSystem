@@ -143,10 +143,17 @@ These are settled. Raise it before changing one.
   only useful while the client retries, and the stored responses would
   grow the table forever. A request with a deleted key is handled as a
   new one. Backed by an index on `created_at`. Reason: without it every
-  run read the whole table, 2.4 GB at 5 million keys. The cost: the DELETE
-  has the worker's 5 s like any database call. A backlog it cannot delete
-  in that time, about 2 million keys on an idle database, fails every
-  minute with an error until someone deletes it by hand.
+  run read the whole table, 2.4 GB at 5 million keys. A run deletes at
+  most 100,000 keys. Reason: the DELETE gets the worker's 5 s like any
+  database call. Without a limit, a backlog of about 2 million keys on an
+  idle database would not fit in 5 s, so every run would fail and the
+  backlog would never shrink. 100,000 keys take about 1 s. The query
+  picks the keys with `ARRAY(SELECT ...)`, not with `DELETE ... USING` a
+  subquery. Reason: with `USING` the planner read the whole table on
+  every run, 1.4 s to delete 38 keys. The cost: a worker deletes at most
+  100,000 keys a minute, 144 million a day. If clients store keys faster
+  than that, the table grows. A run that deletes 100,000 keys logs a
+  warning, so a warning every minute means the expiry is falling behind.
 - Pagination is keyset on `id` descending with an opaque cursor. Limit is 1
   to 200, default 50, else 400.
 - List filters: status, channel, batch_id, created from and to. Every invalid

@@ -50,7 +50,7 @@ func TestKeysOlderThan24HoursAreDeleted(t *testing.T) {
 	storeKey(t, db, "kept", "23 hours 59 minutes")
 	var logs syncBuffer
 
-	runExpirer(t, KeyExpirer{Queries: store.New(db), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout})
+	runExpirer(t, KeyExpirer{Queries: store.New(db), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout, MaxKeys: 10})
 	waitFor(t, "the expired key is deleted", func() bool { return !slices.Contains(storedKeys(t, db), "expired") })
 
 	if keys, want := storedKeys(t, db), []string{"kept"}; !slices.Equal(keys, want) {
@@ -58,6 +58,23 @@ func TestKeysOlderThan24HoursAreDeleted(t *testing.T) {
 	}
 	waitFor(t, "the delete is logged", func() bool {
 		return logs.lineWith(`"level":"INFO"`, `"msg":"expired idempotency keys deleted"`, `"count":1`)
+	})
+}
+
+func TestOneRunDeletesAtMostMaxKeys(t *testing.T) {
+	db := testdb.New(t)
+	storeKey(t, db, "expired-1", "27 hours")
+	storeKey(t, db, "expired-2", "26 hours")
+	storeKey(t, db, "expired-3", "25 hours")
+	storeKey(t, db, "kept", "23 hours")
+	var logs syncBuffer
+
+	runExpirer(t, KeyExpirer{Queries: store.New(db), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout, MaxKeys: 2})
+	waitFor(t, "only the kept key is left", func() bool { return slices.Equal(storedKeys(t, db), []string{"kept"}) })
+
+	waitFor(t, "one run deletes two keys with a warning and the next deletes one", func() bool {
+		return logs.lineWith(`"level":"WARN"`, `"msg":"key expiry reached its limit, expired idempotency keys may remain"`, `"count":2`) &&
+			logs.lineWith(`"level":"INFO"`, `"msg":"expired idempotency keys deleted"`, `"count":1`)
 	})
 }
 
@@ -70,7 +87,7 @@ func TestKeyExpiryGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runExpirer(t, KeyExpirer{Queries: store.New(db), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: 50 * time.Millisecond})
+	runExpirer(t, KeyExpirer{Queries: store.New(db), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: 50 * time.Millisecond, MaxKeys: 10})
 	waitFor(t, "the delete gives up", func() bool {
 		return logs.lineWith(`"level":"ERROR"`, `"msg":"delete expired idempotency keys"`, "context deadline exceeded")
 	})
