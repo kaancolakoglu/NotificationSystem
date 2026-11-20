@@ -26,6 +26,7 @@ const (
 	backoffBase       = time.Second
 	sendsPerSecond    = 90
 	sendBurst         = 5
+	breakerOpenFor    = 30 * time.Second
 	sweepInterval     = 15 * time.Second
 	keyExpiryInterval = time.Minute
 	keyExpiryMaxKeys  = 100_000
@@ -80,15 +81,16 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 	for _, channel := range channels {
 		loops.Go(func() {
 			worker.Pool{
-				Queries:      queries,
-				Provider:     client,
-				Limiter:      limiter,
-				Logger:       logger,
-				Channel:      channel,
-				Size:         poolSize,
-				Interval:     pollInterval,
-				QueryTimeout: timeout,
-				BackoffBase:  backoffBase,
+				Queries:        queries,
+				Provider:       client,
+				Limiter:        limiter,
+				Logger:         logger,
+				Channel:        channel,
+				Size:           poolSize,
+				Interval:       pollInterval,
+				QueryTimeout:   timeout,
+				BackoffBase:    backoffBase,
+				BreakerOpenFor: breakerOpenFor,
 			}.Run(ctx)
 		})
 	}

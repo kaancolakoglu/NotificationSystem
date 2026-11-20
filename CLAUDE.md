@@ -264,10 +264,24 @@ These are settled. Raise it before changing one.
   by a partial index on
   `(locked_until) WHERE status = 'processing'`. Reason: the sweep must not
   scan the whole table every 15 s, and few rows are `processing` at a time.
-- Breaker: one per channel. Opens after 5 consecutive failures for 30 s; 3
-  trial calls when half-open. Only transport errors, timeouts and 5xx count.
-  While open, the poll loop does not claim for that channel. A row the
-  breaker refuses is released.
+- Breaker: one per channel in each worker. Workers do not share it: each
+  counts its own failures and makes its own trial calls. It opens after 5
+  failures in a row and stays open for 30 s. Then it is half-open and lets
+  3 trial calls through. If all 3 succeed, it closes. If one fails, it
+  opens again for 30 s. Only transport errors, timeouts and 5xx answers
+  count as failures. Every other answer counts as a success and ends the
+  run of failures: 202, every 4xx including 408 and 429, a 200 and a
+  redirect. Reason: the provider answered, so it is up. While open, the
+  poll loop does not claim for that channel. While half-open it claims
+  only for trial calls that have not started: 3, less the calls the
+  breaker has let through since it went half-open, less the rows the pool
+  holds. Reason: the breaker refuses every call after the third, also
+  while the 3 are still waiting for their answer, so more rows would be
+  claimed and released at every poll. Measured with two slow trial
+  calls: 98 rows claimed and released in 500 ms. A row the breaker
+  refuses is released. Every change of state is logged. The cost: a
+  trial call that fails uses up an attempt like any call, so in a long
+  outage up to 3 notifications per worker lose an attempt every 30 s.
 - Shutdown on SIGTERM: stop polling, release rows whose send has not
   started, let in-flight sends finish (deadline 30 s), exit.
 - Compose uses `cmd/fakeprovider` by default. `PROVIDER_URL` switches to a

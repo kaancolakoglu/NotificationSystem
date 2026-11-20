@@ -30,9 +30,10 @@ type Message struct {
 }
 
 type Error struct {
-	Retryable  bool
-	RetryAfter time.Duration
-	err        error
+	Retryable   bool
+	Unavailable bool
+	RetryAfter  time.Duration
+	err         error
 }
 
 func (e *Error) Error() string {
@@ -83,7 +84,7 @@ func (c *Client) Send(ctx context.Context, id uuid.UUID, message Message) (strin
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return "", &Error{Retryable: true, err: fmt.Errorf("call provider: %w", err)}
+		return "", &Error{Retryable: true, Unavailable: true, err: fmt.Errorf("call provider: %w", err)}
 	}
 	defer func() {
 		if err := response.Body.Close(); err != nil {
@@ -123,8 +124,11 @@ func statusError(response *http.Response, body []byte) *Error {
 	case response.StatusCode == http.StatusTooManyRequests:
 		e.Retryable = true
 		e.RetryAfter = retryAfter(response.Header)
-	case response.StatusCode == http.StatusRequestTimeout, response.StatusCode >= http.StatusInternalServerError:
+	case response.StatusCode == http.StatusRequestTimeout:
 		e.Retryable = true
+	case response.StatusCode >= http.StatusInternalServerError:
+		e.Retryable = true
+		e.Unavailable = true
 	}
 	return e
 }

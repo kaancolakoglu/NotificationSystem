@@ -387,7 +387,7 @@ func TestBackoffGrowsWithTheAttempt(t *testing.T) {
 	const rows = 30
 	db := testdb.New(t)
 	queries := store.New(db)
-	_, client := newProvider(t, status(http.StatusInternalServerError))
+	_, client := newProvider(t, status(http.StatusTooManyRequests))
 	ids := make([]uuid.UUID, rows)
 	for i := range ids {
 		ids[i] = insert(t, queries, "sms", 1).ID
@@ -615,7 +615,7 @@ func TestResultForARowThatIsNotProcessingIsLogged(t *testing.T) {
 	pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
 	pending := insert(t, queries, "sms", 1)
 
-	pool.send(t.Context(), pending)
+	pool.send(t.Context(), pool.newBreaker(t.Context()), pending)
 
 	if status := get(t, queries, pending.ID).Status; status != "pending" {
 		t.Errorf("status = %q, want %q", status, "pending")
@@ -795,7 +795,7 @@ func TestStaleResultWriteChangesNothing(t *testing.T) {
 				t.Fatalf("attempts of the two claims = %d and %d, want 1 and 2", stale.Attempts, current.Attempts)
 			}
 
-			pool.send(t.Context(), stale)
+			pool.send(t.Context(), pool.newBreaker(t.Context()), stale)
 
 			if stored := get(t, queries, created.ID); stored != current {
 				t.Errorf("row after the stale result = %+v, want it unchanged %+v", stored, current)

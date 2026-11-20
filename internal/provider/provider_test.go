@@ -100,15 +100,16 @@ func TestSendDelivers(t *testing.T) {
 
 func TestSendClassifiesAnswers(t *testing.T) {
 	tests := []struct {
-		name           string
-		status         int
-		retryAfter     string
-		wantRetryable  bool
-		wantRetryAfter time.Duration
+		name            string
+		status          int
+		retryAfter      string
+		wantRetryable   bool
+		wantUnavailable bool
+		wantRetryAfter  time.Duration
 	}{
-		{name: "500 is retried", status: http.StatusInternalServerError, wantRetryable: true},
-		{name: "503 is retried", status: http.StatusServiceUnavailable, wantRetryable: true},
-		{name: "503 with Retry-After is retried without it", status: http.StatusServiceUnavailable, retryAfter: "7", wantRetryable: true},
+		{name: "500 is retried", status: http.StatusInternalServerError, wantRetryable: true, wantUnavailable: true},
+		{name: "503 is retried", status: http.StatusServiceUnavailable, wantRetryable: true, wantUnavailable: true},
+		{name: "503 with Retry-After is retried without it", status: http.StatusServiceUnavailable, retryAfter: "7", wantRetryable: true, wantUnavailable: true},
 		{name: "408 is retried", status: http.StatusRequestTimeout, wantRetryable: true},
 		{name: "429 is retried", status: http.StatusTooManyRequests, wantRetryable: true},
 		{name: "429 with Retry-After in seconds", status: http.StatusTooManyRequests, retryAfter: "7", wantRetryable: true, wantRetryAfter: 7 * time.Second},
@@ -140,6 +141,9 @@ func TestSendClassifiesAnswers(t *testing.T) {
 
 			if err.Retryable != tt.wantRetryable {
 				t.Errorf("retryable = %t, want %t", err.Retryable, tt.wantRetryable)
+			}
+			if err.Unavailable != tt.wantUnavailable {
+				t.Errorf("unavailable = %t, want %t", err.Unavailable, tt.wantUnavailable)
 			}
 			if err.RetryAfter != tt.wantRetryAfter {
 				t.Errorf("retry after = %s, want %s", err.RetryAfter, tt.wantRetryAfter)
@@ -193,8 +197,8 @@ func TestSendDoesNotFollowRedirect(t *testing.T) {
 
 	err := sendError(t, client)
 
-	if err.Retryable {
-		t.Error("retryable = true, want false")
+	if err.Retryable || err.Unavailable {
+		t.Errorf("retryable = %t, unavailable = %t, want both false", err.Retryable, err.Unavailable)
 	}
 	if followed != 0 {
 		t.Errorf("redirect target got %d requests, want 0", followed)
@@ -218,8 +222,8 @@ func TestSendTimesOut(t *testing.T) {
 
 	err := sendError(t, client)
 
-	if !err.Retryable {
-		t.Error("retryable = false, want true")
+	if !err.Retryable || !err.Unavailable {
+		t.Errorf("retryable = %t, unavailable = %t, want both true", err.Retryable, err.Unavailable)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error = %v, want a deadline exceeded error", err)
@@ -314,8 +318,8 @@ func TestSendTransportError(t *testing.T) {
 
 	err := sendError(t, client)
 
-	if !err.Retryable {
-		t.Error("retryable = false, want true")
+	if !err.Retryable || !err.Unavailable {
+		t.Errorf("retryable = %t, unavailable = %t, want both true", err.Retryable, err.Unavailable)
 	}
 	if !strings.HasPrefix(err.Error(), "call provider: dial tcp ") || strings.Contains(err.Error(), urlToken) {
 		t.Errorf("error = %q, want the dial error without the provider URL", err)
