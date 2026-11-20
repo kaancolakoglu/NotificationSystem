@@ -98,6 +98,9 @@ These are settled. Raise it before changing one.
 - Circuit breaker: `sony/gobreaker/v2`.
 - IDs: UUIDv7 from `google/uuid`, generated in the API.
 - Logs: `log/slog` JSON. Metrics: Prometheus `client_golang`.
+- Tracing: OpenTelemetry (`otel` and `otel/sdk`), exported over OTLP on
+  HTTP (`otlptracehttp`). Compose runs Jaeger, which shows the traces at
+  `localhost:16686`.
 - Tests: standard `testing` and `httptest`; `testify/require` allowed;
   `testcontainers-go` (Postgres and Redis modules) for integration tests.
 
@@ -363,7 +366,8 @@ These are settled. Raise it before changing one.
   way does not count for the breaker. The deadline is a safety net: a
   provider call takes at most 5 s and a result write 5 s. Compose gives
   the worker 40 s before it kills it. Reason: the default is 10 s,
-  shorter than the deadline.
+  shorter than the deadline. After the deadline a last publish can take
+  5 s and the export of the spans 2 s.
 - Compose uses `cmd/fakeprovider` by default. `PROVIDER_URL` switches to a
   webhook.site URL. Reason: free webhook.site URLs stop after 50 to 100
   requests. The README says so. The fake provider answers 202. A
@@ -457,6 +461,57 @@ These are settled. Raise it before changing one.
   without Redis and exits only if `REDIS_URL` does not parse. Readiness
   does not look at the subscription for status events, which comes back
   a second after Redis does.
+- Tracing: a delivery is one trace with three kinds of span. The API
+  starts a server span for every `/v1` request. Its name is the route,
+  such as `POST /v1/notifications`, or the method alone when no route
+  matched. It carries the method, the status and the correlation id, and
+  a status of 500 or more marks it as an error. A `traceparent` header
+  from the caller continues the caller's trace, and one that is not
+  valid is ignored. `tracestate` is not read. The span's context is
+  stored on each notification the request creates, in `trace_context`,
+  as a W3C `traceparent` text, so a batch shares one. It is stored only
+  when the span is recorded. So the column is null when tracing is off,
+  also if the caller sent a `traceparent`, when the caller did not
+  sample its trace, and for rows from before it existed. Reason: the
+  worker would start spans under a parent that nobody recorded. A
+  replay with an `Idempotency-Key` creates
+  nothing, so the row keeps the context of the first request. The worker
+  reads the context of a row it claimed and starts two spans as children
+  of the request span: `claim`, which covers the claim query, and
+  `provider call`, a client span around the request to the provider.
+  Both carry the notification id, the channel and the attempt. A failed
+  provider call marks its span as an error with the text that is stored
+  as `last_error`. A retry adds another pair. A row that is released has
+  a `claim` span and no `provider call`. A row without a trace context
+  gets no span. Reason: each span would be a trace of its own. The
+  sweeper is not traced. The request to the provider carries no
+  `traceparent`. Reason: the provider is another company's service.
+  Tracing is on when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, in the API
+  and in the worker each. It is the base URL of an OTLP endpoint on
+  HTTP, and `/v1/traces` is added to it. A value that is not an http or
+  https URL with a host makes the binary exit at start. Without it
+  nothing is traced and no context is stored. Each binary logs at start
+  whether tracing is on. A trace the API starts is always sampled. One
+  that continues a caller's trace follows the caller's sampled flag. The
+  sampler is set in the code, so `OTEL_TRACES_SAMPLER` does not change
+  it.
+  At 90 sends a second per channel that is about 540 worker spans a
+  second. Spans are exported in batches of up to 512, at least every
+  5 s. If the endpoint is down, a batch is tried again for up to 30 s,
+  and each failed export is one JSON line at warn level. The messages of
+  the OpenTelemetry libraries themselves are JSON lines too, their
+  errors at error level. Reason: both printed plain text to stderr.
+  Meanwhile 2048 spans wait
+  in memory, and spans beyond that are dropped without a line. A request
+  or a send never waits for an export. When the worker stops, after its
+  pools have returned, it waits at most 2 s to export the spans it still
+  holds. Spans not sent by then are lost and an error is logged. The API
+  does not handle a stop signal, so it loses the spans of its last
+  seconds. The OpenTelemetry libraries read other `OTEL_` variables
+  themselves, such as `OTEL_EXPORTER_OTLP_HEADERS` and the `OTEL_BSP_`
+  ones. The span of a status stream
+  lasts as long as the stream. In compose the API and the worker do not
+  wait for Jaeger, and Jaeger keeps the traces in memory.
 - Status events: every status change a worker stores is published on the
   Redis channel `notifications:status`, as JSON with `notification_id`,
   `batch_id` if the row has one, `status` and `attempts`. A pool publishes
@@ -531,7 +586,7 @@ internal/store      sqlc queries and generated code
 internal/provider   HTTP client, error classes
 internal/worker     poll loop, pools, retry, sweeper, key expiry
 internal/ratelimit
-internal/obs        logging, metrics
+internal/obs        logging, metrics, tracing
 internal/events     status events: publisher, hub of the streams
 migrations/
 ```

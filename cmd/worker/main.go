@@ -28,6 +28,8 @@ import (
 
 const (
 	metricsAddr       = ":8082"
+	serviceName       = "notification-worker"
+	traceFlushTimeout = 2 * time.Second
 	readHeaderTimeout = 5 * time.Second
 	poolSize          = 20
 	pollInterval      = 200 * time.Millisecond
@@ -55,14 +57,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	if err := run(ctx, logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("PROVIDER_URL"), metricsAddr, databaseTimeout); err != nil {
+	if err := run(ctx, logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("PROVIDER_URL"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), metricsAddr, databaseTimeout); err != nil {
 		logger.Error("worker exited", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("worker stopped")
 }
 
-func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, providerURL, metricsAddr string, timeout time.Duration) error {
+func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, providerURL, otlpEndpoint, metricsAddr string, timeout time.Duration) error {
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is not set")
 	}
@@ -74,6 +76,17 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 		return fmt.Errorf("REDIS_URL is not a Redis URL: %w", err)
 	}
 	redis.SetLogger(obs.RedisLogger{Logger: logger})
+	tracer, shutdownTracer, err := obs.NewTracer(ctx, logger, serviceName, otlpEndpoint)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), traceFlushTimeout)
+		defer cancel()
+		if err := shutdownTracer(flushCtx); err != nil {
+			logger.ErrorContext(ctx, "flush traces", "error", err)
+		}
+	}()
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -117,6 +130,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 				Logger:          logger,
 				Metrics:         metrics,
 				Events:          publisher,
+				Tracer:          tracer,
 				Channel:         channel,
 				Size:            poolSize,
 				Interval:        pollInterval,

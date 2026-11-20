@@ -36,7 +36,7 @@ func TestStatusEventsAreStreamedThroughTheWholeHandler(t *testing.T) {
 		stop()
 		<-stopped
 	})
-	server := httptest.NewServer(newHandler(db, client, hub, logger))
+	server := httptest.NewServer(newHandler(db, client, hub, untraced, logger))
 	t.Cleanup(server.Close)
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/v1/notifications", strings.NewReader(`{"recipient":"+905551234567","channel":"sms","content":"hello"}`))
 	if err != nil {

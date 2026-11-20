@@ -22,6 +22,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oapi-codegen/runtime"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
@@ -46,6 +49,7 @@ const (
 	maxBatchSize           = 1000
 
 	correlationIDHeader   = "X-Correlation-ID"
+	traceParentHeader     = "traceparent"
 	maxCorrelationIDBytes = 128
 
 	defaultPageSize int32 = 50
@@ -75,7 +79,7 @@ type server struct {
 	publisher events.Publisher
 }
 
-func Register(mux *http.ServeMux, pool *pgxpool.Pool, hub *events.Hub, publisher events.Publisher, logger *slog.Logger) {
+func Register(mux *http.ServeMux, pool *pgxpool.Pool, hub *events.Hub, publisher events.Publisher, tracer trace.Tracer, logger *slog.Logger) {
 	runtime.SetJSONCodec(strictJSON{})
 	requestErrorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
 		status, message := requestError(err)
@@ -102,7 +106,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, hub *events.Hub, publisher
 	})
 	v1.Handle("GET /v1/notifications/{id}/events", checkQuery(s.streamEvents(logger, "notification not found", s.notificationExists)))
 	v1.Handle("GET /v1/batches/{id}/events", checkQuery(s.streamEvents(logger, "batch not found", s.batchExists)))
-	mux.Handle("/v1/", correlate(logger, v1))
+	mux.Handle("/v1/", correlate(logger, tracer, v1))
 }
 
 type startedResponse struct {
@@ -119,7 +123,7 @@ func (w *startedResponse) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func correlate(logger *slog.Logger, next http.Handler) http.Handler {
+func correlate(logger *slog.Logger, tracer trace.Tracer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		response := &startedResponse{ResponseWriter: w}
@@ -137,16 +141,30 @@ func correlate(logger *slog.Logger, next http.Handler) http.Handler {
 			}
 			id = generated.String()
 		}
-		ctx := obs.WithCorrelationID(r.Context(), id)
+		ctx := obs.WithTraceParent(obs.WithCorrelationID(r.Context(), id), r.Header.Get(traceParentHeader))
+		ctx, span := tracer.Start(ctx, r.Method, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
+			attribute.String("http.request.method", r.Method),
+			attribute.String("correlation_id", id),
+		))
+		request := r.WithContext(ctx)
+		request.Pattern = ""
 		response.Header().Set(correlationIDHeader, id)
 		defer func() {
+			if request.Pattern != "" {
+				span.SetName(request.Pattern)
+			}
+			span.SetAttributes(attribute.Int("http.response.status_code", response.status))
+			if response.status >= http.StatusInternalServerError {
+				span.SetStatus(codes.Error, http.StatusText(response.status))
+			}
+			span.End()
 			logger.InfoContext(ctx, "request handled", "method", r.Method, "path", r.URL.Path, "status", response.status, "duration_seconds", time.Since(started).Seconds())
 		}()
 		if len(sent) > 0 && !valid {
 			writeError(ctx, response, logger, http.StatusBadRequest, correlationIDMessage)
 			return
 		}
-		next.ServeHTTP(response, r.WithContext(ctx))
+		next.ServeHTTP(response, request)
 	})
 }
 
@@ -215,6 +233,7 @@ func (s *server) CreateNotification(ctx context.Context, request CreateNotificat
 			Content:       content,
 			Priority:      priorityValue,
 			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
+			TraceContext:  traceContext(ctx),
 			ScheduledAt:   timestamptz(body.ScheduledAt),
 		})
 		if err != nil {
@@ -275,6 +294,7 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 			Priority:      priorityValue,
 			BatchID:       pgtype.UUID{Bytes: batchID, Valid: true},
 			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
+			TraceContext:  traceContext(ctx),
 			NextAttemptAt: scheduledAt,
 		})
 	}
@@ -546,6 +566,13 @@ func priorityOf(body CreateNotificationRequest) Priority {
 		return Normal
 	}
 	return *body.Priority
+}
+
+func traceContext(ctx context.Context) pgtype.Text {
+	if !trace.SpanFromContext(ctx).IsRecording() {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: obs.TraceParent(ctx), Valid: true}
 }
 
 func timestamptz(t *time.Time) pgtype.Timestamptz {

@@ -11,6 +11,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/sony/gobreaker/v2"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
@@ -34,6 +38,7 @@ type Pool struct {
 	Logger          *slog.Logger
 	Metrics         *obs.WorkerMetrics
 	Events          events.Publisher
+	Tracer          trace.Tracer
 	Channel         string
 	Size            int32
 	Interval        time.Duration
@@ -149,11 +154,13 @@ func (p Pool) claim(ctx context.Context, jobs chan<- store.Notification, busy *a
 			return
 		}
 		queryCtx, cancel := context.WithTimeout(ctx, p.QueryTimeout)
+		started := time.Now()
 		claimed, err := p.Queries.ClaimNotifications(queryCtx, store.ClaimNotificationsParams{
 			Channel:  p.Channel,
 			Priority: priority,
 			RowLimit: free,
 		})
+		ended := time.Now()
 		cancel()
 		if err != nil {
 			p.Logger.ErrorContext(ctx, "claim notifications", "channel", p.Channel, "priority", priority, "error", err)
@@ -162,6 +169,8 @@ func (p Pool) claim(ctx context.Context, jobs chan<- store.Notification, busy *a
 		changes := make([]events.Event, len(claimed))
 		for i, notification := range claimed {
 			changes[i] = events.New(notification.ID, notification.BatchID, notification.Status, notification.Attempts)
+			_, span := p.startSpan(ctx, notification, "claim", trace.WithTimestamp(started))
+			span.End(trace.WithTimestamp(ended))
 		}
 		p.Events.Publish(ctx, changes...)
 		for _, notification := range claimed {
@@ -170,6 +179,18 @@ func (p Pool) claim(ctx context.Context, jobs chan<- store.Notification, busy *a
 			jobs <- notification
 		}
 	}
+}
+
+func (p Pool) startSpan(ctx context.Context, notification store.Notification, name string, options ...trace.SpanStartOption) (context.Context, trace.Span) {
+	if !notification.TraceContext.Valid {
+		return ctx, noop.Span{}
+	}
+	options = append(options, trace.WithAttributes(
+		attribute.String("notification.id", notification.ID.String()),
+		attribute.String("notification.channel", notification.Channel),
+		attribute.Int("notification.attempt", int(notification.Attempts)),
+	))
+	return p.Tracer.Start(obs.WithTraceParent(ctx, notification.TraceContext.String), name, options...)
 }
 
 func (p Pool) release(ctx context.Context, notification store.Notification, level slog.Level, message string, cause error) {
@@ -185,11 +206,16 @@ func (p Pool) release(ctx context.Context, notification store.Notification, leve
 func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string], notification store.Notification) {
 	messageID, sendErr := breaker.Execute(func() (string, error) {
 		started := time.Now()
-		messageID, err := p.Provider.Send(ctx, notification.ID, provider.Message{
+		callCtx, span := p.startSpan(ctx, notification, "provider call", trace.WithSpanKind(trace.SpanKindClient))
+		messageID, err := p.Provider.Send(callCtx, notification.ID, provider.Message{
 			To:      notification.Recipient,
 			Channel: notification.Channel,
 			Content: notification.Content,
 		})
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
 		p.Metrics.ProviderCalled(p.Channel, time.Since(started))
 		return messageID, err
 	})

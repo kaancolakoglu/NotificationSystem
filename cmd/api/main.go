@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/trace"
 
 	spec "github.com/kaancolakoglu/NotificationSystem/api"
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
@@ -21,6 +22,8 @@ import (
 
 const (
 	addr              = ":8080"
+	serviceName       = "notification-api"
+	traceFlushTimeout = 2 * time.Second
 	readHeaderTimeout = 5 * time.Second
 	readyTimeout      = time.Second
 	queueCountTimeout = 5 * time.Second
@@ -33,12 +36,12 @@ var channels = []string{"sms", "email", "push"}
 func main() {
 	logger := obs.NewLogger(os.Stdout)
 
-	err := run(context.Background(), logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"))
+	err := run(context.Background(), logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	logger.Error("api server exited", "error", err)
 	os.Exit(1)
 }
 
-func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL string) error {
+func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, otlpEndpoint string) error {
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is not set")
 	}
@@ -47,6 +50,17 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL string)
 		return err
 	}
 	redis.SetLogger(obs.RedisLogger{Logger: logger})
+	tracer, shutdownTracer, err := obs.NewTracer(ctx, logger, serviceName, otlpEndpoint)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), traceFlushTimeout)
+		defer cancel()
+		if err := shutdownTracer(flushCtx); err != nil {
+			logger.ErrorContext(ctx, "flush traces", "error", err)
+		}
+	}()
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -67,7 +81,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL string)
 
 	hub := events.NewHub(redisClient, logger)
 	go hub.Run(ctx)
-	return newServer(pool, redisClient, hub, logger).ListenAndServe()
+	return newServer(pool, redisClient, hub, tracer, logger).ListenAndServe()
 }
 
 func parseRedisURL(redisURL string) (*redis.Options, error) {
@@ -79,16 +93,16 @@ func parseRedisURL(redisURL string) (*redis.Options, error) {
 	return options, nil
 }
 
-func newServer(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, logger *slog.Logger) *http.Server {
+func newServer(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, tracer trace.Tracer, logger *slog.Logger) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           newHandler(pool, redisClient, hub, logger),
+		Handler:           newHandler(pool, redisClient, hub, tracer, logger),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 }
 
-func newHandler(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, logger *slog.Logger) http.Handler {
+func newHandler(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, tracer trace.Tracer, logger *slog.Logger) http.Handler {
 	registry := obs.NewRegistry()
 	registry.MustRegister(obs.QueueCollector{Queries: store.New(pool), Channels: channels, Timeout: queueCountTimeout})
 
@@ -123,7 +137,7 @@ func newHandler(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, 
 			logger.ErrorContext(r.Context(), "write openapi spec", "error", err)
 		}
 	})
-	api.Register(mux, pool, hub, events.Publisher{Client: redisClient, Logger: logger}, logger)
+	api.Register(mux, pool, hub, events.Publisher{Client: redisClient, Logger: logger}, tracer, logger)
 
 	limited := http.NewServeMux()
 	limited.Handle("/", http.MaxBytesHandler(mux, maxBodyBytes))

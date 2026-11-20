@@ -1,5 +1,5 @@
 -- name: InsertNotification :one
-INSERT INTO notifications (id, recipient, channel, content, priority, correlation_id, next_attempt_at)
+INSERT INTO notifications (id, recipient, channel, content, priority, correlation_id, trace_context, next_attempt_at)
 VALUES (
     sqlc.arg('id'),
     sqlc.arg('recipient'),
@@ -7,6 +7,7 @@ VALUES (
     sqlc.arg('content'),
     sqlc.arg('priority'),
     sqlc.narg('correlation_id'),
+    sqlc.narg('trace_context'),
     greatest(sqlc.narg('scheduled_at')::timestamptz, now())
 )
 RETURNING *;
@@ -42,8 +43,8 @@ WHERE key = ANY (ARRAY(
 ));
 
 -- name: InsertBatchNotifications :copyfrom
-INSERT INTO notifications (id, recipient, channel, content, priority, batch_id, correlation_id, next_attempt_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+INSERT INTO notifications (id, recipient, channel, content, priority, batch_id, correlation_id, trace_context, next_attempt_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
 
 -- name: CountBatchByStatus :one
 SELECT

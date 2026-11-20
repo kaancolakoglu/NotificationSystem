@@ -26,6 +26,11 @@ services:
       timeout: 2s
       retries: 10
 
+  jaeger:
+    image: jaegertracing/jaeger:2.23.0
+    ports:
+      - "16686:16686"
+
   migrate:
     build: .
     command: ["migrate"]
@@ -41,6 +46,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
       REDIS_URL: redis://redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -60,6 +66,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
       REDIS_URL: redis://redis:6379
       PROVIDER_URL: ${PROVIDER_URL:-http://fakeprovider:8081/}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -17,7 +17,7 @@ const cancelNotification = `-- name: CancelNotification :one
 UPDATE notifications
 SET status = 'cancelled'
 WHERE id = $1 AND status = 'pending'
-RETURNING id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id
+RETURNING id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id, trace_context
 `
 
 func (q *Queries) CancelNotification(ctx context.Context, id uuid.UUID) (Notification, error) {
@@ -39,6 +39,7 @@ func (q *Queries) CancelNotification(ctx context.Context, id uuid.UUID) (Notific
 		&i.LastError,
 		&i.LockedUntil,
 		&i.CorrelationID,
+		&i.TraceContext,
 	)
 	return i, err
 }
@@ -60,7 +61,7 @@ SET status = 'processing',
     locked_until = now() + interval '60 seconds'
 FROM due
 WHERE notifications.id = due.id
-RETURNING notifications.id, notifications.recipient, notifications.channel, notifications.content, notifications.priority, notifications.status, notifications.created_at, notifications.batch_id, notifications.next_attempt_at, notifications.sent_at, notifications.provider_message_id, notifications.attempts, notifications.last_error, notifications.locked_until, notifications.correlation_id
+RETURNING notifications.id, notifications.recipient, notifications.channel, notifications.content, notifications.priority, notifications.status, notifications.created_at, notifications.batch_id, notifications.next_attempt_at, notifications.sent_at, notifications.provider_message_id, notifications.attempts, notifications.last_error, notifications.locked_until, notifications.correlation_id, notifications.trace_context
 `
 
 type ClaimNotificationsParams struct {
@@ -94,6 +95,7 @@ func (q *Queries) ClaimNotifications(ctx context.Context, arg ClaimNotifications
 			&i.LastError,
 			&i.LockedUntil,
 			&i.CorrelationID,
+			&i.TraceContext,
 		); err != nil {
 			return nil, err
 		}
@@ -229,7 +231,7 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, key string) (GetIdempot
 }
 
 const getNotification = `-- name: GetNotification :one
-SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id FROM notifications
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id, trace_context FROM notifications
 WHERE id = $1
 `
 
@@ -252,6 +254,7 @@ func (q *Queries) GetNotification(ctx context.Context, id uuid.UUID) (Notificati
 		&i.LastError,
 		&i.LockedUntil,
 		&i.CorrelationID,
+		&i.TraceContext,
 	)
 	return i, err
 }
@@ -294,6 +297,7 @@ type InsertBatchNotificationsParams struct {
 	Priority      int16
 	BatchID       pgtype.UUID
 	CorrelationID pgtype.Text
+	TraceContext  pgtype.Text
 	NextAttemptAt time.Time
 }
 
@@ -318,7 +322,7 @@ func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotenc
 }
 
 const insertNotification = `-- name: InsertNotification :one
-INSERT INTO notifications (id, recipient, channel, content, priority, correlation_id, next_attempt_at)
+INSERT INTO notifications (id, recipient, channel, content, priority, correlation_id, trace_context, next_attempt_at)
 VALUES (
     $1,
     $2,
@@ -326,9 +330,10 @@ VALUES (
     $4,
     $5,
     $6,
-    greatest($7::timestamptz, now())
+    $7,
+    greatest($8::timestamptz, now())
 )
-RETURNING id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id
+RETURNING id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id, trace_context
 `
 
 type InsertNotificationParams struct {
@@ -338,6 +343,7 @@ type InsertNotificationParams struct {
 	Content       string
 	Priority      int16
 	CorrelationID pgtype.Text
+	TraceContext  pgtype.Text
 	ScheduledAt   pgtype.Timestamptz
 }
 
@@ -349,6 +355,7 @@ func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotification
 		arg.Content,
 		arg.Priority,
 		arg.CorrelationID,
+		arg.TraceContext,
 		arg.ScheduledAt,
 	)
 	var i Notification
@@ -368,6 +375,7 @@ func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotification
 		&i.LastError,
 		&i.LockedUntil,
 		&i.CorrelationID,
+		&i.TraceContext,
 	)
 	return i, err
 }
@@ -391,7 +399,7 @@ func (q *Queries) InsertTemplate(ctx context.Context, arg InsertTemplateParams) 
 }
 
 const listBatchNotifications = `-- name: ListBatchNotifications :many
-SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id FROM notifications
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id, trace_context FROM notifications
 WHERE batch_id = $1
   AND ($2::uuid IS NULL OR id >= $2)
   AND ($3::uuid IS NULL OR id < $3)
@@ -442,6 +450,7 @@ func (q *Queries) ListBatchNotifications(ctx context.Context, arg ListBatchNotif
 			&i.LastError,
 			&i.LockedUntil,
 			&i.CorrelationID,
+			&i.TraceContext,
 		); err != nil {
 			return nil, err
 		}
@@ -486,7 +495,7 @@ func (q *Queries) ListDeliveryAttempts(ctx context.Context, notificationID uuid.
 }
 
 const listNotifications = `-- name: ListNotifications :many
-SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id FROM notifications
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id, attempts, last_error, locked_until, correlation_id, trace_context FROM notifications
 WHERE id >= coalesce($1, '00000000-0000-0000-0000-000000000000'::uuid)
   AND id < coalesce($2, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
   AND ($3::text IS NULL OR status = $3)
@@ -534,6 +543,7 @@ func (q *Queries) ListNotifications(ctx context.Context, arg ListNotificationsPa
 			&i.LastError,
 			&i.LockedUntil,
 			&i.CorrelationID,
+			&i.TraceContext,
 		); err != nil {
 			return nil, err
 		}

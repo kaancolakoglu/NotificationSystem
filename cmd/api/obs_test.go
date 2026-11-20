@@ -109,7 +109,7 @@ func metricValue(t *testing.T, metrics, series string) float64 {
 
 func TestRunRejectsABadRedisURL(t *testing.T) {
 	for _, redisURL := range []string{"", "http://redis:6379", "redis://redis:port"} {
-		err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", redisURL)
+		err := run(t.Context(), slog.New(slog.DiscardHandler), "postgres://postgres@127.0.0.1:1/postgres", redisURL, "")
 
 		if err == nil || !strings.Contains(err.Error(), "REDIS_URL") {
 			t.Errorf("REDIS_URL %q: error = %v, want one about REDIS_URL", redisURL, err)
@@ -136,7 +136,7 @@ func TestReadyz(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			handler := newHandler(tt.postgres(t), tt.redis(t), nil, obs.NewLogger(&logs))
+			handler := newHandler(tt.postgres(t), tt.redis(t), nil, untraced, obs.NewLogger(&logs))
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			if tt.callerGaveUp {
@@ -190,7 +190,7 @@ func TestMetricsReportTheQueue(t *testing.T) {
 	insert("email", 2, "")
 	var logs bytes.Buffer
 
-	rec := get(t, newHandler(db, nil, nil, obs.NewLogger(&logs)), "/metrics")
+	rec := get(t, newHandler(db, nil, nil, untraced, obs.NewLogger(&logs)), "/metrics")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body)
@@ -233,7 +233,7 @@ func TestMetricsReportTheQueue(t *testing.T) {
 
 func TestMetricsAreServedWithoutTheQueueWhenTheDatabaseIsDown(t *testing.T) {
 	var logs bytes.Buffer
-	handler := newHandler(unreachablePostgres(t), nil, nil, obs.NewLogger(&logs))
+	handler := newHandler(unreachablePostgres(t), nil, nil, untraced, obs.NewLogger(&logs))
 
 	first := get(t, handler, "/metrics")
 	second := get(t, handler, "/metrics")

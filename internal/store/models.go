@@ -41,6 +41,7 @@ type Notification struct {
 	LastError         pgtype.Text
 	LockedUntil       pgtype.Timestamptz
 	CorrelationID     pgtype.Text
+	TraceContext      pgtype.Text
 }
 
 type Template struct {

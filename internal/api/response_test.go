@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
 	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 )
@@ -34,7 +36,7 @@ func (w *brokenWriter) Write([]byte) (int, error) {
 func TestFailedResponseWriteIsNotAnsweredAgain(t *testing.T) {
 	var logs bytes.Buffer
 	mux := http.NewServeMux()
-	api.Register(mux, nil, nil, events.Publisher{}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	api.Register(mux, nil, nil, events.Publisher{}, untraced, slog.New(slog.NewJSONHandler(&logs, nil)))
 
 	w := &brokenWriter{header: http.Header{}}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications", strings.NewReader(`{"recipient":"0555","channel":"sms","content":"hello"}`))
@@ -54,3 +56,5 @@ func TestFailedResponseWriteIsNotAnsweredAgain(t *testing.T) {
 		}
 	}
 }
+
+var untraced = noop.NewTracerProvider().Tracer("")

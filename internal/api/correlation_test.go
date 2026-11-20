@@ -31,7 +31,7 @@ func newLoggedServer(t *testing.T) (*http.ServeMux, *pgxpool.Pool, *bytes.Buffer
 	var logs bytes.Buffer
 	logger := obs.NewLogger(&logs)
 	mux := http.NewServeMux()
-	api.Register(mux, pool, nil, events.Publisher{Client: testredis.New(t), Logger: logger}, logger)
+	api.Register(mux, pool, nil, events.Publisher{Client: testredis.New(t), Logger: logger}, untraced, logger)
 	return mux, pool, &logs
 }
 

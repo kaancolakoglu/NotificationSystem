@@ -28,7 +28,7 @@ func newTestServer(t *testing.T) (*http.ServeMux, *pgxpool.Pool) {
 	pool := testdb.New(t)
 	logger := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
-	api.Register(mux, pool, nil, events.Publisher{Client: testredis.New(t), Logger: logger}, logger)
+	api.Register(mux, pool, nil, events.Publisher{Client: testredis.New(t), Logger: logger}, untraced, logger)
 	return mux, pool
 }
 

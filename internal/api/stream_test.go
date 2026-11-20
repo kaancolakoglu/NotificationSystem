@@ -20,6 +20,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
 	"github.com/kaancolakoglu/NotificationSystem/internal/events"
@@ -66,6 +69,7 @@ type streamServer struct {
 	redis     *redis.Client
 	publisher events.Publisher
 	logs      *sharedLogs
+	spans     *tracetest.SpanRecorder
 }
 
 func newStreamServer(t *testing.T) streamServer {
@@ -93,11 +97,12 @@ func newStreamServer(t *testing.T) streamServer {
 		return ok
 	})
 	publisher := events.Publisher{Client: client, Logger: logger}
+	spans := tracetest.NewSpanRecorder()
 	mux := http.NewServeMux()
-	api.Register(mux, pool, hub, publisher, logger)
+	api.Register(mux, pool, hub, publisher, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)).Tracer("test"), logger)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	return streamServer{url: server.URL, pool: pool, redis: client, publisher: publisher, logs: logs}
+	return streamServer{url: server.URL, pool: pool, redis: client, publisher: publisher, logs: logs, spans: spans}
 }
 
 func waitUntil(t *testing.T, what string, done func() bool) {
@@ -337,7 +342,7 @@ func TestStreamIsRefusedWhileTheHubHasNoSubscription(t *testing.T) {
 	client := testredis.New(t)
 	logger := obs.NewLogger(io.Discard)
 	mux := http.NewServeMux()
-	api.Register(mux, pool, events.NewHub(client, logger), events.Publisher{Client: client, Logger: logger}, logger)
+	api.Register(mux, pool, events.NewHub(client, logger), events.Publisher{Client: client, Logger: logger}, untraced, logger)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	id := newRow(t, pool, "pending", pgtype.UUID{})
@@ -471,6 +476,28 @@ func TestClientThatStopsReadingLosesItsStream(t *testing.T) {
 	if lines := server.logs.linesWith(`"level":"WARN"`, `"msg":"write status event, closing the stream"`, "context deadline exceeded"); lines != 1 {
 		t.Errorf("logs have %d warning lines for a write that timed out, want 1", lines)
 	}
+}
+
+func TestSpanOfAStreamLastsAsLongAsTheStream(t *testing.T) {
+	server := newStreamServer(t)
+	id := newRow(t, server.pool, "pending", pgtype.UUID{})
+	conn, _ := openStream(t, server.url+"/v1/notifications/"+id.String()+"/events", nil)
+	server.publisher.Publish(t.Context(), events.New(id, pgtype.UUID{}, "sent", 1))
+	readEvent(t, conn)
+
+	if ended := server.spans.Ended(); len(ended) != 0 {
+		t.Fatalf("%d spans ended while the stream is open, want none", len(ended))
+	}
+	if err := conn.Close(websocket.StatusNormalClosure, ""); err != nil {
+		t.Fatalf("close the stream: %v", err)
+	}
+
+	waitUntil(t, "the span of the stream ends", func() bool { return len(server.spans.Ended()) == 1 })
+	span := server.spans.Ended()[0]
+	if span.Name() != "GET /v1/notifications/{id}/events" {
+		t.Errorf("span = %q, want GET /v1/notifications/{id}/events", span.Name())
+	}
+	wantAttributes(t, span, attribute.Int("http.response.status_code", http.StatusSwitchingProtocols))
 }
 
 func TestDataMessageFromTheClientClosesTheStream(t *testing.T) {

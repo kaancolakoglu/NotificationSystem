@@ -80,9 +80,10 @@ func lockTable(t *testing.T, db *pgxpool.Pool, table string) (pgx.Tx, error) {
 }
 
 type request struct {
-	key  string
-	body string
-	at   time.Time
+	key         string
+	traceParent string
+	body        string
+	at          time.Time
 }
 
 type fakeProvider struct {
@@ -97,7 +98,7 @@ func (f *fakeProvider) record(r *http.Request) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.requests = append(f.requests, request{key: r.Header.Get("Idempotency-Key"), body: string(body), at: time.Now()})
+	f.requests = append(f.requests, request{key: r.Header.Get("Idempotency-Key"), traceParent: r.Header.Get("Traceparent"), body: string(body), at: time.Now()})
 	return nil
 }
 
@@ -111,6 +112,18 @@ func (f *fakeProvider) arrivals(channel string) []time.Time {
 		}
 	}
 	return arrivals
+}
+
+func (f *fakeProvider) traceParents() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var sent []string
+	for _, request := range f.requests {
+		if request.traceParent != "" {
+			sent = append(sent, request.traceParent)
+		}
+	}
+	return sent
 }
 
 func (f *fakeProvider) keys() []string {
