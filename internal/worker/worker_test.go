@@ -21,8 +21,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
+	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
+	"github.com/kaancolakoglu/NotificationSystem/internal/testredis"
 )
 
 const (
@@ -43,14 +45,19 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 }
 
 func (b *syncBuffer) lineWith(parts ...string) bool {
+	return b.linesWith(parts...) > 0
+}
+
+func (b *syncBuffer) linesWith(parts ...string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	lines := 0
 	for line := range strings.SplitSeq(b.buffer.String(), "\n") {
 		if !slices.ContainsFunc(parts, func(part string) bool { return !strings.Contains(line, part) }) {
-			return true
+			lines++
 		}
 	}
-	return false
+	return lines
 }
 
 func lockTable(t *testing.T, db *pgxpool.Pool, table string) (pgx.Tx, error) {
@@ -89,6 +96,18 @@ func (f *fakeProvider) record(r *http.Request) error {
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, request{key: r.Header.Get("Idempotency-Key"), body: string(body), at: time.Now()})
 	return nil
+}
+
+func (f *fakeProvider) arrivals(channel string) []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var arrivals []time.Time
+	for _, request := range f.requests {
+		if strings.Contains(request.body, `"channel":"`+channel+`"`) {
+			arrivals = append(arrivals, request.at)
+		}
+	}
+	return arrivals
 }
 
 func (f *fakeProvider) keys() []string {
@@ -155,6 +174,11 @@ func hold(t *testing.T, db *pgxpool.Pool, id uuid.UUID, attempts int16, lease st
 	if _, err := db.Exec(t.Context(), "UPDATE notifications SET status = 'processing', attempts = $2, locked_until = now() + $3::interval WHERE id = $1", id, attempts, lease); err != nil {
 		t.Fatalf("set the notification processing: %v", err)
 	}
+}
+
+func unlimited(t *testing.T) *ratelimit.Limiter {
+	t.Helper()
+	return ratelimit.New(testredis.New(t), 1_000_000, 1_000_000)
 }
 
 func runSweeper(t *testing.T, sweeper Sweeper) {
@@ -227,7 +251,7 @@ func TestCreatedRowIsSent(t *testing.T) {
 	fake, client := newProvider(t, accept)
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the notification is sent", func() bool { return get(t, queries, created.ID).Status == "sent" })
 	time.Sleep(10 * pollInterval)
 
@@ -264,7 +288,7 @@ func TestPermanentFailureIsNotRetried(t *testing.T) {
 	fake, client := newProvider(t, status(http.StatusBadRequest))
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the notification is failed", func() bool { return get(t, queries, created.ID).Status == "failed" })
 	time.Sleep(10 * pollInterval)
 
@@ -295,7 +319,7 @@ func TestProviderAnswerIsStoredAsTheLastError(t *testing.T) {
 	})
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the notification is failed", func() bool { return get(t, queries, created.ID).Status == "failed" })
 
 	if stored := get(t, queries, created.ID); stored.LastError.String != failure {
@@ -313,7 +337,7 @@ func TestRetryableFailureIsSentAgain(t *testing.T) {
 	fake, client := newProvider(t, inOrder(status(http.StatusInternalServerError), accept))
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the notification is sent", func() bool { return get(t, queries, created.ID).Status == "sent" })
 	time.Sleep(10 * pollInterval)
 
@@ -337,7 +361,7 @@ func TestNotificationFailsWhenAttemptsAreUsedUp(t *testing.T) {
 	fake, client := newProvider(t, status(http.StatusInternalServerError))
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the notification is failed", func() bool { return get(t, queries, created.ID).Status == "failed" })
 	time.Sleep(50 * pollInterval)
 
@@ -369,7 +393,7 @@ func TestBackoffGrowsWithTheAttempt(t *testing.T) {
 		ids[i] = insert(t, queries, "sms", 1).ID
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 10, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 10, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "every notification is failed", func() bool { return countByStatus(t, db, "failed") == rows })
 
 	const ceiling = backoffBase << 4
@@ -400,7 +424,7 @@ func TestRetryWaitsForRetryAfter(t *testing.T) {
 	}, accept))
 	created := insert(t, queries, "sms", 1)
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the notification is sent", func() bool { return get(t, queries, created.ID).Status == "sent" })
 
 	fake.mu.Lock()
@@ -453,7 +477,7 @@ func TestTwoPoolsNeverSendTheSameRow(t *testing.T) {
 	}
 
 	for range 2 {
-		runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "email", Size: 5, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+		runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "email", Size: 5, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	}
 	waitFor(t, "every notification is sent", func() bool { return countByStatus(t, db, "sent") == rows })
 	time.Sleep(10 * pollInterval)
@@ -475,7 +499,7 @@ func TestHighPriorityGoesFirst(t *testing.T) {
 		priority[insert(t, queries, "push", p).ID.String()] = p
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "push", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "push", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "every notification is sent", func() bool { return countByStatus(t, db, "sent") == len(priority) })
 
 	var got []int16
@@ -500,7 +524,7 @@ func TestPoolClaimsOnlyItsFreeCapacity(t *testing.T) {
 		insert(t, queries, "sms", 1)
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: size, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: size, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the pool is full", func() bool { return len(fake.keys()) == size })
 	time.Sleep(10 * pollInterval)
 
@@ -523,7 +547,7 @@ func TestCancelledRowIsNeverSent(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the other notifications are sent", func() bool { return countByStatus(t, db, "sent") == 2 })
 	time.Sleep(10 * pollInterval)
 
@@ -542,7 +566,7 @@ func TestCancelRacingWithClaimHasOneWinner(t *testing.T) {
 	db := testdb.New(t)
 	queries := store.New(db)
 	fake, client := newProvider(t, accept)
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: time.Millisecond, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 5, Interval: time.Millisecond, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 
 	ids := make([]uuid.UUID, rows)
 	cancelled := make([]bool, rows)
@@ -614,7 +638,7 @@ func TestClaimGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: 50 * time.Millisecond, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: 50 * time.Millisecond, BackoffBase: backoffBase})
 	waitFor(t, "the claim gives up", func() bool {
 		return logs.lineWith(`"msg":"claim notifications"`, `"channel":"sms"`, "context deadline exceeded")
 	})
@@ -652,7 +676,7 @@ func TestResultWriteGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 			created := insert(t, queries, "sms", 1)
 			var logs syncBuffer
 
-			runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: 50 * time.Millisecond, BackoffBase: backoffBase})
+			runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: 50 * time.Millisecond, BackoffBase: backoffBase})
 			select {
 			case err := <-locked:
 				if err != nil {
@@ -683,7 +707,7 @@ func TestExpiredLeaseIsSentAgain(t *testing.T) {
 	due := insert(t, queries, "sms", 1)
 	var logs syncBuffer
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "the pending notification is sent", func() bool { return get(t, queries, due.ID).Status == "sent" })
 	if keys, want := fake.keys(), []string{due.ID.String()}; !slices.Equal(keys, want) {
 		t.Fatalf("provider got requests for %v before the sweeper ran, want only %v", keys, want)
@@ -718,7 +742,7 @@ func TestExpiredLeaseWithAttemptsUsedUpFails(t *testing.T) {
 	hold(t, db, lost.ID, maxAttempts, "-1 second")
 	var logs syncBuffer
 
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	runSweeper(t, Sweeper{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout})
 	waitFor(t, "the notification is failed", func() bool { return get(t, queries, lost.ID).Status == "failed" })
 	time.Sleep(10 * pollInterval)
@@ -810,7 +834,7 @@ func TestSweepGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 	}
 	later := insert(t, queries, "sms", 1)
 	hold(t, db, later.ID, 1, "-1 second")
-	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	waitFor(t, "a lease that expires after the database answers again is swept and sent", func() bool {
 		return get(t, queries, later.ID).Status == "sent"
 	})

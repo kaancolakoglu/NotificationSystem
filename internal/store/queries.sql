@@ -118,6 +118,12 @@ WITH written AS (
 INSERT INTO delivery_attempts (notification_id, attempt, error)
 SELECT id, attempts, last_error FROM written;
 
+-- name: ReleaseNotification :execrows
+UPDATE notifications
+SET status = 'pending',
+    attempts = attempts - 1
+WHERE id = sqlc.arg('id') AND status = 'processing' AND attempts = sqlc.arg('attempts');
+
 -- name: SweepExpiredLeases :many
 WITH swept AS (
     UPDATE notifications

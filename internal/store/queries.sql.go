@@ -476,6 +476,26 @@ func (q *Queries) MarkSent(ctx context.Context, arg MarkSentParams) (int64, erro
 	return result.RowsAffected(), nil
 }
 
+const releaseNotification = `-- name: ReleaseNotification :execrows
+UPDATE notifications
+SET status = 'pending',
+    attempts = attempts - 1
+WHERE id = $1 AND status = 'processing' AND attempts = $2
+`
+
+type ReleaseNotificationParams struct {
+	ID       uuid.UUID
+	Attempts int16
+}
+
+func (q *Queries) ReleaseNotification(ctx context.Context, arg ReleaseNotificationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseNotification, arg.ID, arg.Attempts)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const scheduleRetry = `-- name: ScheduleRetry :execrows
 WITH written AS (
     UPDATE notifications

@@ -205,13 +205,27 @@ These are settled. Raise it before changing one.
   last failed or lost attempt, and stays after a later success.
 - Every notification the API returns has `attempts` and `last_error`.
   `GET /v1/notifications/{id}` also lists the delivery attempts.
-- Rate limit per channel: rate 90 per second, burst 5, so we release at
+- Rate limit per channel: rate 90 per second, burst 5, so we send at
   most 95 in any one-second window. The limit of 100 is counted at the
   provider, and the spare 5 absorbs requests bunching on the way there. On
   deny, wait the delay the limiter returns. Every provider call takes a
-  token, retries included.
+  token, retries included. A sender takes the token after the claim, so a
+  claimed row waits for it inside its lease. The wait is short: each worker
+  holds at most 20 rows per channel and 90 tokens come every second, so
+  even with 10 workers a row waits about 2 s.
 - If Redis is unreachable, do not send. Release the row, and do not claim
-  for that channel until Redis answers. Log and count it.
+  for that channel until Redis answers. Log and count it. The same goes
+  for any limiter call that fails, such as a Redis that refuses writes.
+  After a failed call, the pool takes a token itself at each poll instead
+  of claiming, and claims again once it gets one. Reason: a check that
+  writes nothing, such as a ping or a request for zero tokens, passed on a
+  Redis that refuses writes, so the pool would claim and release its rows
+  at every poll. The cost: each time a pool recovers, one token is taken
+  and not used. A limiter call uses go-redis's default timeouts. Measured:
+  with Redis stopped a call fails within 6 s. With a Redis that stopped
+  answering, 60 senders had all released their rows after 25 s, inside
+  the 60 s lease. The worker starts without Redis and exits only if
+  `REDIS_URL` does not parse.
 - Worker: per channel, a pool of 20 goroutines fed by a Go channel. Poll
   every 200 ms. Claim at most the pool's free capacity. Query once per
   priority, high first.
@@ -343,8 +357,10 @@ GET  /healthz   GET /readyz   GET /metrics   GET /openapi.yaml
 - Integration tests skip under `-short`. No build tags.
 - Database tests in one package share one Postgres container, and each
   test gets its own database in it. Reason: a container per test took 1 s
-  per test. `make test-isolated` gives every test its own container again,
-  to check that no test passes only because the server is shared.
+  per test. Redis tests share one Redis container the same way, and each
+  test gets its own database number in it. `make test-isolated` gives every
+  test its own containers again, to check that no test passes only because
+  the server is shared.
 - golangci-lint v2: default linters plus `bodyclose`, `noctx`, `errorlint`,
   `gosec`, `misspell`. Formatters `gofumpt` and `goimports`. The gosec
   check for weak random numbers (G404) is off in `internal/worker/worker.go`.

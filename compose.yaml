@@ -56,9 +56,12 @@ services:
     command: ["worker"]
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
+      REDIS_URL: redis://redis:6379
       PROVIDER_URL: ${PROVIDER_URL:-http://fakeprovider:8081/}
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
       fakeprovider:
         condition: service_healthy

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
+	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 )
 
@@ -22,6 +23,7 @@ var priorities = []int16{0, 1, 2}
 type Pool struct {
 	Queries      *store.Queries
 	Provider     *provider.Client
+	Limiter      *ratelimit.Limiter
 	Logger       *slog.Logger
 	Channel      string
 	Size         int32
@@ -33,11 +35,17 @@ type Pool struct {
 func (p Pool) Run(ctx context.Context) {
 	jobs := make(chan store.Notification, p.Size)
 	var busy atomic.Int32
+	var limiterDown atomic.Bool
 	var senders sync.WaitGroup
 	for range p.Size {
 		senders.Go(func() {
 			for notification := range jobs {
-				p.send(ctx, notification)
+				if err := p.Limiter.Wait(ctx, p.Channel); err != nil {
+					limiterDown.Store(true)
+					p.release(ctx, notification, err)
+				} else {
+					p.send(ctx, notification)
+				}
 				busy.Add(-1)
 			}
 		})
@@ -52,6 +60,14 @@ func (p Pool) Run(ctx context.Context) {
 			senders.Wait()
 			return
 		case <-ticker.C:
+			if limiterDown.Load() {
+				if err := p.Limiter.Wait(ctx, p.Channel); err != nil {
+					p.Logger.ErrorContext(ctx, "rate limiter still fails, not claiming", "channel", p.Channel, "error", err)
+					continue
+				}
+				limiterDown.Store(false)
+				p.Logger.InfoContext(ctx, "rate limiter works again, claiming", "channel", p.Channel)
+			}
 			p.claim(ctx, jobs, &busy)
 		}
 	}
@@ -80,6 +96,14 @@ func (p Pool) claim(ctx context.Context, jobs chan<- store.Notification, busy *a
 			jobs <- notification
 		}
 	}
+}
+
+func (p Pool) release(ctx context.Context, notification store.Notification, cause error) {
+	p.Logger.ErrorContext(ctx, "rate limiter failed, releasing the notification", "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "error", cause)
+	queryCtx, cancel := context.WithTimeout(ctx, p.QueryTimeout)
+	defer cancel()
+	changed, err := p.Queries.ReleaseNotification(queryCtx, store.ReleaseNotificationParams{ID: notification.ID, Attempts: notification.Attempts})
+	p.checkWrite(ctx, notification, "pending", "", changed, err)
 }
 
 func (p Pool) send(ctx context.Context, notification store.Notification) {
