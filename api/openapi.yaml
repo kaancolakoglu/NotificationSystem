@@ -228,6 +228,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/notifications/{id}/cancel:
+    post:
+      operationId: cancelNotification
+      summary: Cancel a pending notification
+      description: >-
+        Only a pending notification can be cancelled. A cancelled
+        notification is never sent. The request has no body.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The notification, now cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Notification"
+        "400":
+          description: The id is not a UUID, or a query parameter was sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No notification has this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            The notification is not pending: it is being sent, was sent, has
+            failed or was already cancelled. Nothing was changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: The server failed to cancel the notification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/batches/{id}:
     get:
       operationId: getBatch

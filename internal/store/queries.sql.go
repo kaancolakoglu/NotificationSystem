@@ -12,6 +12,29 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const cancelNotification = `-- name: CancelNotification :one
+UPDATE notifications
+SET status = 'cancelled'
+WHERE id = $1 AND status = 'pending'
+RETURNING id, recipient, channel, content, priority, status, created_at, batch_id
+`
+
+func (q *Queries) CancelNotification(ctx context.Context, id uuid.UUID) (Notification, error) {
+	row := q.db.QueryRow(ctx, cancelNotification, id)
+	var i Notification
+	err := row.Scan(
+		&i.ID,
+		&i.Recipient,
+		&i.Channel,
+		&i.Content,
+		&i.Priority,
+		&i.Status,
+		&i.CreatedAt,
+		&i.BatchID,
+	)
+	return i, err
+}
+
 const countBatchByStatus = `-- name: CountBatchByStatus :one
 SELECT
     count(*) AS total,

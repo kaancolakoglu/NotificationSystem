@@ -574,6 +574,155 @@ func countNotifications(t *testing.T, pool *pgxpool.Pool) int {
 	return count
 }
 
+func TestCancelNotification(t *testing.T) {
+	mux, pool := newTestServer(t)
+	queries := store.New(pool)
+
+	const notPendingMessage = "only a pending notification can be cancelled"
+
+	cancel := func(t *testing.T, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications/"+id+"/cancel", nil)
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	insert := func(t *testing.T, status string) store.Notification {
+		t.Helper()
+		id, err := uuid.NewV7()
+		if err != nil {
+			t.Fatalf("generate id: %v", err)
+		}
+		insertNotification(t, pool, id, "sms", status, pgtype.UUID{})
+		row, err := queries.GetNotification(t.Context(), id)
+		if err != nil {
+			t.Fatalf("get inserted row: %v", err)
+		}
+		return row
+	}
+	wantStored := func(t *testing.T, want store.Notification) {
+		t.Helper()
+		got, err := queries.GetNotification(t.Context(), want.ID)
+		if err != nil {
+			t.Fatalf("get stored row: %v", err)
+		}
+		if got != want {
+			t.Errorf("stored row = %+v, want %+v", got, want)
+		}
+	}
+
+	t.Run("pending is cancelled", func(t *testing.T) {
+		row := insert(t, "pending")
+		other := insert(t, "pending")
+
+		rec := cancel(t, row.ID.String())
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body)
+		}
+		got := decodeBody[api.Notification](t, rec)
+		if !got.CreatedAt.Equal(row.CreatedAt) {
+			t.Errorf("created_at = %s, want %s", got.CreatedAt, row.CreatedAt)
+		}
+		want := api.Notification{
+			Id:        row.ID,
+			Recipient: "+905551234567",
+			Channel:   api.Sms,
+			Content:   "hello",
+			Priority:  api.Normal,
+			Status:    api.Cancelled,
+			CreatedAt: got.CreatedAt,
+		}
+		if got != want {
+			t.Errorf("response = %+v, want %+v", got, want)
+		}
+		row.Status = "cancelled"
+		wantStored(t, row)
+		wantStored(t, other)
+	})
+
+	for _, status := range []string{"processing", "sent", "failed", "cancelled"} {
+		t.Run(status+" is 409", func(t *testing.T) {
+			row := insert(t, status)
+
+			wantError(t, cancel(t, row.ID.String()), http.StatusConflict, notPendingMessage)
+			wantStored(t, row)
+		})
+	}
+
+	t.Run("second cancel is 409", func(t *testing.T) {
+		row := insert(t, "pending")
+
+		first := cancel(t, row.ID.String())
+		second := cancel(t, row.ID.String())
+
+		if first.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body %s", first.Code, http.StatusOK, first.Body)
+		}
+		wantError(t, second, http.StatusConflict, notPendingMessage)
+		row.Status = "cancelled"
+		wantStored(t, row)
+	})
+
+	t.Run("simultaneous cancels: one wins", func(t *testing.T) {
+		row := insert(t, "pending")
+		responses := make([]*httptest.ResponseRecorder, 20)
+
+		var wg sync.WaitGroup
+		for i := range responses {
+			wg.Go(func() {
+				responses[i] = cancel(t, row.ID.String())
+			})
+		}
+		wg.Wait()
+
+		won := 0
+		for _, rec := range responses {
+			if rec.Code == http.StatusOK {
+				won++
+				continue
+			}
+			wantError(t, rec, http.StatusConflict, notPendingMessage)
+		}
+		if won != 1 {
+			t.Errorf("%d cancels answered 200, want 1", won)
+		}
+		row.Status = "cancelled"
+		wantStored(t, row)
+	})
+
+	t.Run("unknown id", func(t *testing.T) {
+		unknown, err := uuid.NewV7()
+		if err != nil {
+			t.Fatalf("generate id: %v", err)
+		}
+
+		wantError(t, cancel(t, unknown.String()), http.StatusNotFound, "notification not found")
+	})
+
+	t.Run("malformed id", func(t *testing.T) {
+		wantError(t, cancel(t, "not-a-uuid"), http.StatusBadRequest, `parameter "id" is not valid`)
+	})
+
+	t.Run("query parameter", func(t *testing.T) {
+		row := insert(t, "pending")
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications/"+row.ID.String()+"/cancel?force=true", nil)
+		mux.ServeHTTP(rec, req)
+
+		wantError(t, rec, http.StatusBadRequest, `parameter "force" is not known`)
+		wantStored(t, row)
+	})
+
+	t.Run("database failure", func(t *testing.T) {
+		row := insert(t, "pending")
+		pool.Close()
+
+		wantError(t, cancel(t, row.ID.String()), http.StatusInternalServerError, "internal error")
+	})
+}
+
 func TestGetBatch(t *testing.T) {
 	mux, pool := newTestServer(t)
 

@@ -7,6 +7,12 @@ RETURNING *;
 SELECT * FROM notifications
 WHERE id = $1;
 
+-- name: CancelNotification :one
+UPDATE notifications
+SET status = 'cancelled'
+WHERE id = $1 AND status = 'pending'
+RETURNING *;
+
 -- name: InsertIdempotencyKey :execrows
 INSERT INTO idempotency_keys (key, request_hash, response)
 VALUES ($1, $2, $3)

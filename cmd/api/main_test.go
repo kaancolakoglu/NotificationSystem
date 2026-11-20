@@ -98,6 +98,7 @@ func TestQueryParametersAreCheckedPerRoute(t *testing.T) {
 		{name: "unknown on the list", method: http.MethodGet, target: "/v1/notifications?size=10", wantMessage: `parameter \"size\" is not known`},
 		{name: "list parameter on another route", method: http.MethodGet, target: "/v1/batches/019a0000-0000-7000-8000-000000000000?limit=10", wantMessage: `parameter \"limit\" is not known`},
 		{name: "list parameter on the batch route", method: http.MethodPost, target: "/v1/notifications/batch?limit=10", wantMessage: `parameter \"limit\" is not known`},
+		{name: "list parameter on the cancel route", method: http.MethodPost, target: "/v1/notifications/019a0000-0000-7000-8000-000000000000/cancel?limit=10", wantMessage: `parameter \"limit\" is not known`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

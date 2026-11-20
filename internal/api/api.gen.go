@@ -225,6 +225,9 @@ type ServerInterface interface {
 	// GetNotification Get a notification by id
 	// (GET /v1/notifications/{id})
 	GetNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
+	// CancelNotification Cancel a pending notification
+	// (POST /v1/notifications/{id}/cancel)
+	CancelNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -481,6 +484,32 @@ func (siw *ServerInterfaceWrapper) GetNotification(w http.ResponseWriter, r *htt
 	handler.ServeHTTP(w, r)
 }
 
+// CancelNotification operation middleware
+func (siw *ServerInterfaceWrapper) CancelNotification(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CancelNotification(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -605,6 +634,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/notifications", wrapper.CreateNotification)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/notifications/batch", wrapper.CreateBatch)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/notifications/{id}", wrapper.GetNotification)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/notifications/{id}/cancel", wrapper.CancelNotification)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/batches/{id}", wrapper.GetBatch)
 
 	return m
@@ -974,6 +1004,84 @@ func (response GetNotification500JSONResponse) VisitGetNotificationResponse(w ht
 	return err
 }
 
+type CancelNotificationRequestObject struct {
+	Id openapi_types.UUID `json:"id"`
+}
+
+type CancelNotificationResponseObject interface {
+	VisitCancelNotificationResponse(w http.ResponseWriter) error
+}
+
+type CancelNotification200JSONResponse Notification
+
+func (response CancelNotification200JSONResponse) VisitCancelNotificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CancelNotification400JSONResponse Error
+
+func (response CancelNotification400JSONResponse) VisitCancelNotificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CancelNotification404JSONResponse Error
+
+func (response CancelNotification404JSONResponse) VisitCancelNotificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CancelNotification409JSONResponse Error
+
+func (response CancelNotification409JSONResponse) VisitCancelNotificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CancelNotification500JSONResponse Error
+
+func (response CancelNotification500JSONResponse) VisitCancelNotificationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// GetBatch Get the status counts of a batch
@@ -991,6 +1099,9 @@ type StrictServerInterface interface {
 	// GetNotification Get a notification by id
 	// (GET /v1/notifications/{id})
 	GetNotification(ctx context.Context, request GetNotificationRequestObject) (GetNotificationResponseObject, error)
+	// CancelNotification Cancel a pending notification
+	// (POST /v1/notifications/{id}/cancel)
+	CancelNotification(ctx context.Context, request CancelNotificationRequestObject) (CancelNotificationResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -1169,6 +1280,32 @@ func (sh *strictHandler) GetNotification(w http.ResponseWriter, r *http.Request,
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetNotificationResponseObject); ok {
 		if err := validResponse.VisitGetNotificationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CancelNotification operation middleware
+func (sh *strictHandler) CancelNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+	var request CancelNotificationRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CancelNotification(ctx, request.(CancelNotificationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CancelNotification")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CancelNotificationResponseObject); ok {
+		if err := validResponse.VisitCancelNotificationResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

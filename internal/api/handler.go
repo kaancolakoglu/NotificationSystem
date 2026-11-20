@@ -221,6 +221,29 @@ func (s *server) GetNotification(ctx context.Context, request GetNotificationReq
 	return GetNotification200JSONResponse(notification), nil
 }
 
+func (s *server) CancelNotification(ctx context.Context, request CancelNotificationRequestObject) (CancelNotificationResponseObject, error) {
+	row, err := s.queries.CancelNotification(ctx, request.Id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		_, err := s.queries.GetNotification(ctx, request.Id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CancelNotification404JSONResponse{Message: "notification not found"}, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get notification after cancel changed no row: %w", err)
+		}
+		return CancelNotification409JSONResponse{Message: "only a pending notification can be cancelled"}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cancel notification: %w", err)
+	}
+
+	notification, err := toNotification(row)
+	if err != nil {
+		return nil, err
+	}
+	return CancelNotification200JSONResponse(notification), nil
+}
+
 func (s *server) ListNotifications(ctx context.Context, request ListNotificationsRequestObject) (ListNotificationsResponseObject, error) {
 	params := request.Params
 	limit := defaultPageSize
