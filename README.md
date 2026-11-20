@@ -65,7 +65,8 @@ docker compose up --build --wait
 | API documentation (Swagger UI, read only) | http://localhost:8081 |
 | OpenAPI spec | http://localhost:8080/openapi.yaml, or `api/openapi.yaml` |
 | Traces (Jaeger) | http://localhost:16686 |
-| Metrics | http://localhost:8080/metrics |
+| Metrics: queue depth | http://localhost:8080/metrics |
+| Metrics: sent, failed, latency | on the worker, see "Observability" |
 | Health, readiness | http://localhost:8080/healthz, http://localhost:8080/readyz |
 
 Stop it and delete its data with `docker compose down --volumes`.
@@ -317,7 +318,14 @@ Compose gives it 40 s.
   `notifications_retried_total`, `provider_call_duration_seconds`,
   `notification_delivery_duration_seconds`, `circuit_breaker_state` and
   `rate_limiter_failures_total`, by channel, on port 8082 inside the
-  compose network.
+  compose network. Compose does not publish that port, because several
+  workers cannot share one host port. Read a worker's metrics with:
+
+  ```sh
+  docker compose exec worker wget -qO- localhost:8082/metrics
+  ```
+
+  With several workers, `--index=2` picks the second one.
 - **Logs** are JSON lines. A line that belongs to a request or a
   delivery has its `correlation_id`.
 - **Traces** go to Jaeger over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is
