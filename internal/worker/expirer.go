@@ -30,7 +30,7 @@ func (e KeyExpirer) Run(ctx context.Context) {
 }
 
 func (e KeyExpirer) expire(ctx context.Context) {
-	queryCtx, cancel := context.WithTimeout(ctx, e.QueryTimeout)
+	queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.QueryTimeout)
 	defer cancel()
 	deleted, err := e.Queries.DeleteExpiredIdempotencyKeys(queryCtx, e.MaxKeys)
 	if err != nil {

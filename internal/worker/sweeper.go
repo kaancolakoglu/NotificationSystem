@@ -31,7 +31,7 @@ func (s Sweeper) Run(ctx context.Context) {
 }
 
 func (s Sweeper) sweep(ctx context.Context) {
-	queryCtx, cancel := context.WithTimeout(ctx, s.QueryTimeout)
+	queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.QueryTimeout)
 	defer cancel()
 	swept, err := s.Queries.SweepExpiredLeases(queryCtx, store.SweepExpiredLeasesParams{
 		MaxAttempts: maxAttempts,

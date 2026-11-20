@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -143,5 +144,47 @@ func TestShutdownCancelsSendsStillInFlightAtTheDeadline(t *testing.T) {
 	}
 	if logs.lineWith(breakerChanged) {
 		t.Error("the breaker changed state, want sends cut off at the deadline not to count as failures")
+	}
+}
+
+func TestStopDoesNotCutOffASweep(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	lost := insert(t, queries, "sms", 1)
+	hold(t, db, lost.ID, 1, "-1 second")
+	var logs syncBuffer
+	ctx, stop := context.WithCancel(t.Context())
+	stop()
+
+	Sweeper{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(ctx)
+
+	if stored := get(t, queries, lost.ID); stored.Status != "pending" || stored.LastError.String != leaseExpired {
+		t.Errorf("notification with an expired lease is %s with last error %+v, want pending with %q", stored.Status, stored.LastError, leaseExpired)
+	}
+	if !logs.lineWith(`"level":"WARN"`, `"msg":"lease expired"`, `"notification_id":"`+lost.ID.String()+`"`) {
+		t.Error("logs have no lease expired line for the notification")
+	}
+	if logs.lineWith(`"level":"ERROR"`) {
+		t.Error("logs have an error line, want none: a stop is not a failed sweep")
+	}
+}
+
+func TestStopDoesNotCutOffAKeyExpiry(t *testing.T) {
+	db := testdb.New(t)
+	storeKey(t, db, "expired", "24 hours 1 minute")
+	var logs syncBuffer
+	ctx, stop := context.WithCancel(t.Context())
+	stop()
+
+	KeyExpirer{Queries: store.New(db), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout, MaxKeys: 10}.expire(ctx)
+
+	if keys := storedKeys(t, db); len(keys) != 0 {
+		t.Errorf("stored keys = %v, want none", keys)
+	}
+	if !logs.lineWith(`"level":"INFO"`, `"msg":"expired idempotency keys deleted"`, `"count":1`) {
+		t.Error("logs have no line for the deleted key")
+	}
+	if logs.lineWith(`"level":"ERROR"`) {
+		t.Error("logs have an error line, want none: a stop is not a failed key expiry")
 	}
 }
