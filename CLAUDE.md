@@ -79,8 +79,16 @@ These are settled. Raise it before changing one.
   the loser exited with an error. A run waiting for the lock checks again
   every second, for at most 4 minutes. `cmd/migrate` gives up after 5
   minutes. Reason: a database that accepts the connection and never answers
-  would hang it forever. The lock wait is the shorter one, so the error
-  says which of the two happened.
+  would hang it forever. The wait for the advisory lock is the shorter one,
+  so the error says which of the two happened. A run sets `lock_timeout`
+  to 3 s: a statement gives up after waiting that long for one lock on a
+  table or row. Reason: while it waits for a table, every later request
+  for that table waits behind it, and the worker gives a database call
+  5 s. The run then fails with a lock timeout error. Each migration runs
+  in a transaction, so the one it was applying is rolled back, and the run
+  can be started again. This limits the wait only. A migration that has
+  the lock keeps it until it commits, so one that checks or indexes a
+  large table still blocks that table for as long as it runs.
 - Redis: `go-redis/v9`. Limiter: `redis_rate` (GCRA).
 - Circuit breaker: `sony/gobreaker/v2`.
 - IDs: UUIDv7 from `google/uuid`, generated in the API.
