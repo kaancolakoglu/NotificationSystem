@@ -2,11 +2,16 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
@@ -95,6 +100,49 @@ func TestShutdownReleasesANotificationThatWaitsForItsToken(t *testing.T) {
 	}
 	if logs.lineWith(`"level":"ERROR"`) {
 		t.Error("logs have an error line, want none: a stop is not a failed rate limiter")
+	}
+}
+
+func TestStopDuringARateLimiterCheckLogsNoError(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	_, client := newProvider(t, accept)
+	insert(t, queries, "sms", 1)
+	var hangs atomic.Bool
+	hanging := make(chan struct{}, 1)
+	redisClient := redis.NewClient(&redis.Options{Dialer: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		if !hangs.Load() {
+			return nil, errors.New("redis is down")
+		}
+		select {
+		case hanging <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}})
+	t.Cleanup(func() {
+		if err := redisClient.Close(); err != nil {
+			t.Errorf("close redis client: %v", err)
+		}
+	})
+	var logs syncBuffer
+
+	stop, stopped := runPool(t, Pool{Queries: queries, Provider: client, Limiter: ratelimit.New(redisClient, sendsPerSecond, sendBurst), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Minute, ShutdownTimeout: time.Minute})
+	waitFor(t, "the pool checks the rate limiter instead of claiming", func() bool {
+		return logs.lineWith(`"level":"ERROR"`, `"msg":"rate limiter still fails, not claiming"`)
+	})
+	hangs.Store(true)
+	waitToReceive(t, "a rate limiter check is in progress", hanging)
+	before := logs.linesWith(`"level":"ERROR"`)
+	stop()
+	waitToReceive(t, "the pool stops", stopped)
+
+	if after := logs.linesWith(`"level":"ERROR"`); after != before {
+		t.Errorf("logs have %d error lines after the stop and had %d before it, want no new one: a stop is not a failed rate limiter", after, before)
+	}
+	if logs.lineWith(`"msg":"rate limiter works again, claiming"`) {
+		t.Error("logs say the rate limiter works again, want a check cut off by the stop to claim nothing")
 	}
 }
 

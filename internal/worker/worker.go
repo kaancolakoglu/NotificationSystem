@@ -99,7 +99,11 @@ func (p Pool) Run(ctx context.Context) {
 				capacity = min(capacity, breakerTrialCalls-int32(started))
 			}
 			if limiterDown.Load() {
-				if err := p.Limiter.Wait(ctx, p.Channel); err != nil {
+				err := p.Limiter.Wait(ctx, p.Channel)
+				if errors.Is(err, context.Canceled) {
+					continue
+				}
+				if err != nil {
 					p.Logger.ErrorContext(ctx, "rate limiter still fails, not claiming", "channel", p.Channel, "error", err)
 					continue
 				}
