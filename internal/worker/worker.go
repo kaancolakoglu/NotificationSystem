@@ -26,32 +26,47 @@ const (
 var priorities = []int16{0, 1, 2}
 
 type Pool struct {
-	Queries        *store.Queries
-	Provider       *provider.Client
-	Limiter        *ratelimit.Limiter
-	Logger         *slog.Logger
-	Channel        string
-	Size           int32
-	Interval       time.Duration
-	QueryTimeout   time.Duration
-	BackoffBase    time.Duration
-	BreakerOpenFor time.Duration
+	Queries         *store.Queries
+	Provider        *provider.Client
+	Limiter         *ratelimit.Limiter
+	Logger          *slog.Logger
+	Channel         string
+	Size            int32
+	Interval        time.Duration
+	QueryTimeout    time.Duration
+	BackoffBase     time.Duration
+	BreakerOpenFor  time.Duration
+	ShutdownTimeout time.Duration
 }
 
 func (p Pool) Run(ctx context.Context) {
+	work, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		select {
+		case <-work.Done():
+		case <-time.After(p.ShutdownTimeout):
+			p.Logger.ErrorContext(work, "shutdown deadline passed, cancelling the sends in flight", "channel", p.Channel)
+			cancel()
+		}
+	}()
 	jobs := make(chan store.Notification, p.Size)
-	breaker := p.newBreaker(ctx)
+	breaker := p.newBreaker(work)
 	var busy atomic.Int32
 	var limiterDown atomic.Bool
 	var senders sync.WaitGroup
 	for range p.Size {
 		senders.Go(func() {
 			for notification := range jobs {
-				if err := p.Limiter.Wait(ctx, p.Channel); err != nil {
+				switch err := p.Limiter.Wait(ctx, p.Channel); {
+				case err == nil:
+					p.send(work, breaker, notification)
+				case errors.Is(err, context.Canceled):
+					p.release(work, notification, slog.LevelInfo, "worker is stopping, releasing the notification", err)
+				default:
 					limiterDown.Store(true)
-					p.release(ctx, notification, "rate limiter failed, releasing the notification", err)
-				} else {
-					p.send(ctx, breaker, notification)
+					p.release(work, notification, slog.LevelError, "rate limiter failed, releasing the notification", err)
 				}
 				busy.Add(-1)
 			}
@@ -67,6 +82,9 @@ func (p Pool) Run(ctx context.Context) {
 			senders.Wait()
 			return
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				continue
+			}
 			capacity := p.Size
 			switch breaker.State() {
 			case gobreaker.StateOpen:
@@ -86,7 +104,7 @@ func (p Pool) Run(ctx context.Context) {
 				limiterDown.Store(false)
 				p.Logger.InfoContext(ctx, "rate limiter works again, claiming", "channel", p.Channel)
 			}
-			p.claim(ctx, jobs, &busy, capacity)
+			p.claim(work, jobs, &busy, capacity)
 		}
 	}
 }
@@ -102,6 +120,9 @@ func (p Pool) newBreaker(ctx context.Context) *gobreaker.CircuitBreaker[string] 
 		IsSuccessful: func(err error) bool {
 			var failure *provider.Error
 			return !errors.As(err, &failure) || !failure.Unavailable
+		},
+		IsExcluded: func(err error) bool {
+			return errors.Is(err, context.Canceled)
 		},
 		OnStateChange: func(_ string, from, to gobreaker.State) {
 			p.Logger.WarnContext(ctx, "circuit breaker changed state", "channel", p.Channel, "from", from.String(), "to", to.String())
@@ -134,8 +155,8 @@ func (p Pool) claim(ctx context.Context, jobs chan<- store.Notification, busy *a
 	}
 }
 
-func (p Pool) release(ctx context.Context, notification store.Notification, message string, cause error) {
-	p.Logger.ErrorContext(ctx, message, "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "error", cause)
+func (p Pool) release(ctx context.Context, notification store.Notification, level slog.Level, message string, cause error) {
+	p.Logger.Log(ctx, level, message, "channel", p.Channel, "notification_id", notification.ID, "attempt", notification.Attempts, "error", cause)
 	queryCtx, cancel := context.WithTimeout(ctx, p.QueryTimeout)
 	defer cancel()
 	changed, err := p.Queries.ReleaseNotification(queryCtx, store.ReleaseNotificationParams{ID: notification.ID, Attempts: notification.Attempts})
@@ -151,7 +172,7 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 		})
 	})
 	if errors.Is(sendErr, gobreaker.ErrOpenState) || errors.Is(sendErr, gobreaker.ErrTooManyRequests) {
-		p.release(ctx, notification, "circuit breaker refused the call, releasing the notification", sendErr)
+		p.release(ctx, notification, slog.LevelError, "circuit breaker refused the call, releasing the notification", sendErr)
 		return
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, p.QueryTimeout)

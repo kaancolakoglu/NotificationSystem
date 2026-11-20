@@ -54,6 +54,7 @@ services:
   worker:
     build: .
     command: ["worker"]
+    stop_grace_period: 40s
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
       REDIS_URL: redis://redis:6379

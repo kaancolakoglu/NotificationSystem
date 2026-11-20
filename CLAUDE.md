@@ -282,8 +282,20 @@ These are settled. Raise it before changing one.
   refuses is released. Every change of state is logged. The cost: a
   trial call that fails uses up an attempt like any call, so in a long
   outage up to 3 notifications per worker lose an attempt every 30 s.
-- Shutdown on SIGTERM: stop polling, release rows whose send has not
-  started, let in-flight sends finish (deadline 30 s), exit.
+- Shutdown on SIGTERM or SIGINT: stop polling, release rows whose send has
+  not started, let in-flight sends finish (deadline 30 s), exit with
+  status 0. A row still in the pool's queue, or waiting for its rate-limit
+  token, has not started, so it is released. The sweeper and the key
+  expiry stop at once. A send in flight still gets its result written.
+  Reason: claims, sends, releases and result writes run on a context that
+  the signal does not cancel. The deadline counts from the signal. When
+  it passes, each pool logs an error, cancels what is still running and
+  returns once its senders have. Such a row stays `processing` until the
+  sweeper takes it, and the attempt counts as lost. A send cut off this
+  way does not count for the breaker. The deadline is a safety net: a
+  provider call takes at most 5 s and a result write 5 s. Compose gives
+  the worker 40 s before it kills it. Reason: the default is 10 s,
+  shorter than the deadline.
 - Compose uses `cmd/fakeprovider` by default. `PROVIDER_URL` switches to a
   webhook.site URL. Reason: free webhook.site URLs stop after 50 to 100
   requests. The README says so. The fake provider answers 202. A

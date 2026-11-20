@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +29,7 @@ const (
 	sendsPerSecond    = 90
 	sendBurst         = 5
 	breakerOpenFor    = 30 * time.Second
+	shutdownTimeout   = 30 * time.Second
 	sweepInterval     = 15 * time.Second
 	keyExpiryInterval = time.Minute
 	keyExpiryMaxKeys  = 100_000
@@ -37,9 +40,13 @@ var channels = []string{"sms", "email", "push"}
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	err := run(context.Background(), logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("PROVIDER_URL"), databaseTimeout)
-	logger.Error("worker exited", "error", err)
-	os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	if err := run(ctx, logger, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), os.Getenv("PROVIDER_URL"), databaseTimeout); err != nil {
+		logger.Error("worker exited", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("worker stopped")
 }
 
 func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, providerURL string, timeout time.Duration) error {
@@ -81,16 +88,17 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 	for _, channel := range channels {
 		loops.Go(func() {
 			worker.Pool{
-				Queries:        queries,
-				Provider:       client,
-				Limiter:        limiter,
-				Logger:         logger,
-				Channel:        channel,
-				Size:           poolSize,
-				Interval:       pollInterval,
-				QueryTimeout:   timeout,
-				BackoffBase:    backoffBase,
-				BreakerOpenFor: breakerOpenFor,
+				Queries:         queries,
+				Provider:        client,
+				Limiter:         limiter,
+				Logger:          logger,
+				Channel:         channel,
+				Size:            poolSize,
+				Interval:        pollInterval,
+				QueryTimeout:    timeout,
+				BackoffBase:     backoffBase,
+				BreakerOpenFor:  breakerOpenFor,
+				ShutdownTimeout: shutdownTimeout,
 			}.Run(ctx)
 		})
 	}
@@ -111,8 +119,10 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 			MaxKeys:      keyExpiryMaxKeys,
 		}.Run(ctx)
 	})
+	<-ctx.Done()
+	logger.InfoContext(ctx, "worker is stopping, waiting for the sends in flight")
 	loops.Wait()
-	return ctx.Err()
+	return nil
 }
 
 func checkProviderURL(providerURL string) error {

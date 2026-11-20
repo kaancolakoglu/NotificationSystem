@@ -216,14 +216,14 @@ func TestStaleReleaseChangesNothing(t *testing.T) {
 	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), QueryTimeout: queryTimeout}.sweep(t.Context())
 	swept := get(t, queries, created.ID)
 
-	pool.release(t.Context(), stale, "releasing the notification", errors.New("redis is down"))
+	pool.release(t.Context(), stale, slog.LevelError, "releasing the notification", errors.New("redis is down"))
 
 	if stored := get(t, queries, created.ID); stored != swept || stored.Status != "pending" || stored.Attempts != 1 {
 		t.Errorf("row after the stale release = %+v, want it unchanged, pending with 1 attempt: %+v", stored, swept)
 	}
 	current := claim()
 
-	pool.release(t.Context(), stale, "releasing the notification", errors.New("redis is down"))
+	pool.release(t.Context(), stale, slog.LevelError, "releasing the notification", errors.New("redis is down"))
 
 	if stored := get(t, queries, created.ID); stored != current {
 		t.Errorf("row after the stale release = %+v, want it unchanged %+v", stored, current)
@@ -232,7 +232,7 @@ func TestStaleReleaseChangesNothing(t *testing.T) {
 		t.Error("logs have no line for the release that was not written")
 	}
 
-	pool.release(t.Context(), current, "releasing the notification", errors.New("redis is down"))
+	pool.release(t.Context(), current, slog.LevelError, "releasing the notification", errors.New("redis is down"))
 
 	if stored := get(t, queries, created.ID); stored.Status != "pending" || stored.Attempts != 1 {
 		t.Errorf("after the release by the attempt that holds it: status = %q, attempts = %d, want pending and 1", stored.Status, stored.Attempts)

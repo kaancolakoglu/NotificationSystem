@@ -123,8 +123,8 @@ func TestRunKeepsTheProviderLimit(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
-	if err := <-stopped; !errors.Is(err, context.Canceled) {
-		t.Errorf("run returned %v, want the cancelled context error", err)
+	if err := <-stopped; err != nil {
+		t.Errorf("run returned %v after it was told to stop, want no error", err)
 	}
 
 	most, end := 0, 0
@@ -191,7 +191,7 @@ func TestRunSendsANotificationOnEveryChannel(t *testing.T) {
 	}
 
 	cancel()
-	if err := <-stopped; !errors.Is(err, context.Canceled) {
-		t.Errorf("run returned %v, want the cancelled context error", err)
+	if err := <-stopped; err != nil {
+		t.Errorf("run returned %v after it was told to stop, want no error", err)
 	}
 }

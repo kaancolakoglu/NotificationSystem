@@ -191,14 +191,19 @@ func runSweeper(t *testing.T, sweeper Sweeper) {
 	t.Cleanup(func() { <-done })
 }
 
-func runPool(t *testing.T, pool Pool) {
+func runPool(t *testing.T, pool Pool) (stop context.CancelFunc, stopped <-chan struct{}) {
 	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pool.Run(t.Context())
+		pool.Run(ctx)
 	}()
-	t.Cleanup(func() { <-done })
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return cancel, done
 }
 
 func insert(t *testing.T, queries *store.Queries, channel string, priority int16) store.Notification {
