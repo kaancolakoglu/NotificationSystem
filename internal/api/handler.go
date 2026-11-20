@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oapi-codegen/runtime"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/validate"
@@ -68,17 +69,20 @@ var (
 )
 
 type server struct {
-	pool    *pgxpool.Pool
-	queries *store.Queries
+	pool      *pgxpool.Pool
+	queries   *store.Queries
+	hub       *events.Hub
+	publisher events.Publisher
 }
 
-func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
+func Register(mux *http.ServeMux, pool *pgxpool.Pool, hub *events.Hub, publisher events.Publisher, logger *slog.Logger) {
 	runtime.SetJSONCodec(strictJSON{})
 	requestErrorHandler := func(w http.ResponseWriter, r *http.Request, err error) {
 		status, message := requestError(err)
 		writeError(r.Context(), w, logger, status, message)
 	}
-	handler := NewStrictHandlerWithOptions(&server{pool: pool, queries: store.New(pool)}, nil, StrictHTTPServerOptions{
+	s := &server{pool: pool, queries: store.New(pool), hub: hub, publisher: publisher}
+	handler := NewStrictHandlerWithOptions(s, nil, StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: requestErrorHandler,
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			if response, ok := w.(*startedResponse); ok && response.status != 0 {
@@ -90,11 +94,14 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
 		},
 	})
 	v1 := http.NewServeMux()
+	checkQuery := checkQueryParameters(logger)
 	HandlerWithOptions(handler, StdHTTPServerOptions{
 		BaseRouter:       v1,
 		ErrorHandlerFunc: requestErrorHandler,
-		Middlewares:      []MiddlewareFunc{checkQueryParameters(logger)},
+		Middlewares:      []MiddlewareFunc{checkQuery},
 	})
+	v1.Handle("GET /v1/notifications/{id}/events", checkQuery(s.streamEvents(logger, "notification not found", s.notificationExists)))
+	v1.Handle("GET /v1/batches/{id}/events", checkQuery(s.streamEvents(logger, "batch not found", s.batchExists)))
 	mux.Handle("/v1/", correlate(logger, v1))
 }
 
@@ -106,6 +113,10 @@ type startedResponse struct {
 func (w *startedResponse) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *startedResponse) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func correlate(logger *slog.Logger, next http.Handler) http.Handler {
@@ -355,6 +366,7 @@ func (s *server) CancelNotification(ctx context.Context, request CancelNotificat
 		return nil, fmt.Errorf("cancel notification: %w", err)
 	}
 
+	s.publisher.Publish(ctx, events.New(row.ID, row.BatchID, row.Status, row.Attempts))
 	notification, err := toNotification(row)
 	if err != nil {
 		return nil, err

@@ -72,6 +72,11 @@ These are settled. Raise it before changing one.
   `/healthz`, `/readyz`, `/metrics` and `/openapi.yaml` are plain routes on
   the API's mux: the first three serve operators, the last is the spec
   itself. The worker serves `/metrics` only, on port 8082.
+- WebSocket: `coder/websocket`. The two stream endpoints are in the spec
+  for documentation and are left out of the generated server
+  (`exclude-operation-ids`). They are plain handlers on the `/v1` mux.
+  Reason: a strict handler returns a response object and cannot take over
+  the connection.
 - Postgres through `pgx/v5` and `pgxpool`. Queries with sqlc in pgx/v5 mode.
 - Migrations: goose SQL files in `migrations/`, applied by `cmd/migrate`
   using goose as a library with embedded files. A run holds a Postgres
@@ -349,7 +354,9 @@ These are settled. Raise it before changing one.
   sweeper and the key expiry finish a run in progress, at most 5 s, then
   stop. Reason: a run cut off by the signal logged an error although
   nothing had failed, and a sweep that still finished on the server
-  logged none of its rows. The deadline counts from the signal. When
+  logged none of its rows. The sweeper then still publishes the events
+  of that run, which can add up to 5 s. The deadline counts from the
+  signal. When
   it passes, each pool logs an error, cancels what is still running and
   returns once its senders have. Such a row stays `processing` until the
   sweeper takes it, and the attempt counts as lost. A send cut off this
@@ -446,9 +453,70 @@ These are settled. Raise it before changing one.
   requests. A ping goes on when the caller gives up. Reason: cut off, it
   was logged as a failed dependency. The API's Redis client obeys the
   deadline of a call (`ContextTimeoutEnabled`). Reason: by default
-  go-redis waits 3 s for an answer whatever the deadline. Besides this
-  ping the API does not use Redis. It starts without Redis and exits only
-  if `REDIS_URL` does not parse.
+  go-redis waits 3 s for an answer whatever the deadline. The API starts
+  without Redis and exits only if `REDIS_URL` does not parse. Readiness
+  does not look at the subscription for status events, which comes back
+  a second after Redis does.
+- Status events: every status change a worker stores is published on the
+  Redis channel `notifications:status`, as JSON with `notification_id`,
+  `batch_id` if the row has one, `status` and `attempts`. A pool publishes
+  the rows of each claim in one round trip, before its senders get them,
+  so within one worker `processing` comes before the result. A sender
+  publishes after its
+  result or release write, and only if the write changed the row, like
+  the counters. The sweeper publishes the rows it moved. The API
+  publishes a cancel. Reason: it is a status change too, and a client
+  that watches a batch would not learn of it. Creating a notification is
+  not an event. Events are best effort: one that cannot be published is
+  logged at error level with the notification ids and lost, and the
+  delivery goes on. A publish
+  gets 2 s and goes on when its caller is cancelled. A cancel answers
+  after its publish, so a Redis that does not answer delays it by up to
+  2 s. The worker's Redis
+  client does not obey a deadline while it waits on the socket, so there
+  a publish to a Redis that never answers takes 5 s. Measured with such a
+  Redis: 60 claimed rows were all released after 10 s, inside the 60 s
+  lease. Redis does not keep pub/sub apart by database number, so every
+  worker and API on one Redis server share the channel.
+- Status streams: `GET /v1/notifications/{id}/events` and
+  `GET /v1/batches/{id}/events` are WebSocket endpoints. After the
+  upgrade the API sends every event of that notification, or of any
+  notification of that batch, as a text message, as it was published.
+  The stream is subscribed before the API answers 101, so no event after
+  the upgrade is missed.
+  Each API process keeps one Redis subscription and passes the events on
+  to its streams in memory. Reason: a subscription per stream is a Redis
+  connection per client. The cost: every API process receives every
+  event, about 600 a second at the full sending rate. A stream has no
+  history and no first message. So a client connects first, then fetches
+  the status, and fetches it again after every reconnect. The events of
+  one notification can arrive out of order. Reason: each is published
+  after its own write, on its own connection, and a retry can be claimed
+  by another worker at once. `sent`, `failed` and `cancelled` are final,
+  so a client ignores what arrives after one of them. The API closes
+  a stream with code 1013 when the stream may have missed events: when
+  the Redis subscription failed, and when the stream holds 256 events
+  the client has not read. A write to a client gets 5 s. Then the API
+  drops the connection without a close frame, so a client that stopped
+  reading sees code 1006. While the API has no subscription, a new
+  stream is refused with 503. After a failed subscription the API waits
+  a second and opens a new one, and logs an error for each try that
+  fails. Reason for a new one: after an error that Redis answered, such
+  as a refused permission, go-redis keeps the connection, and the old
+  subscription waited on it forever. The subscription has no ping. A
+  Redis host that
+  vanished is found by TCP keep-alive after about 45 s, and until then
+  the streams stay open and get nothing. An unknown id is 404, found
+  with the queries of the status endpoints. A query parameter is 400. A
+  data message from the client closes the stream with code 1008. A
+  request whose `Origin` header names another host or port than its
+  `Host` header is 403. Reason: it is the library's default, and it
+  keeps a page of another site from opening a stream in a visitor's
+  browser. A handshake the library refuses is answered in plain text,
+  not with an error object. The streams have no ping either. Reason:
+  TCP keep-alive finds a client that vanished, within minutes. The
+  request line of a stream is logged when the stream
+  ends, with status 101 and the lifetime of the stream as its duration.
 
 ## Design reference
 
@@ -464,6 +532,7 @@ internal/provider   HTTP client, error classes
 internal/worker     poll loop, pools, retry, sweeper, key expiry
 internal/ratelimit
 internal/obs        logging, metrics
+internal/events     status events: publisher, hub of the streams
 migrations/
 ```
 
@@ -518,6 +587,8 @@ GET  /v1/notifications
 POST /v1/notifications/{id}/cancel
 GET  /v1/batches/{id}
 POST /v1/templates
+GET  /v1/notifications/{id}/events   WebSocket
+GET  /v1/batches/{id}/events         WebSocket
 GET  /healthz   GET /readyz   GET /metrics   GET /openapi.yaml
 ```
 
@@ -537,7 +608,9 @@ GET  /healthz   GET /readyz   GET /metrics   GET /openapi.yaml
   `gosec`, `misspell`. Formatters `gofumpt` and `goimports`. The gosec
   check for weak random numbers (G404) is off in `internal/worker/worker.go`.
   Reason: the retry delay only spreads retries out, so `math/rand/v2` is
-  enough, and `crypto/rand` would add an error path.
+  enough, and `crypto/rand` would add an error path. The `bodyclose`
+  check is off on lines that call `websocket.Dial`. Reason: `Dial`
+  closes the response body itself, also after a handshake that failed.
 - oapi-codegen, sqlc and golangci-lint are each pinned as a `tool` in a
   module of their own, `tools/<name>/go.mod`, so their dependencies stay
   out of the app's `go.mod`. Make targets hide the `-modfile` flag. CI

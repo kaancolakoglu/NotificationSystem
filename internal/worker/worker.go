@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/sony/gobreaker/v2"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
 	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
@@ -32,6 +33,7 @@ type Pool struct {
 	Limiter         *ratelimit.Limiter
 	Logger          *slog.Logger
 	Metrics         *obs.WorkerMetrics
+	Events          events.Publisher
 	Channel         string
 	Size            int32
 	Interval        time.Duration
@@ -157,6 +159,11 @@ func (p Pool) claim(ctx context.Context, jobs chan<- store.Notification, busy *a
 			p.Logger.ErrorContext(ctx, "claim notifications", "channel", p.Channel, "priority", priority, "error", err)
 			return
 		}
+		changes := make([]events.Event, len(claimed))
+		for i, notification := range claimed {
+			changes[i] = events.New(notification.ID, notification.BatchID, notification.Status, notification.Attempts)
+		}
+		p.Events.Publish(ctx, changes...)
 		for _, notification := range claimed {
 			busy.Add(1)
 			free--
@@ -170,7 +177,9 @@ func (p Pool) release(ctx context.Context, notification store.Notification, leve
 	queryCtx, cancel := context.WithTimeout(ctx, p.QueryTimeout)
 	defer cancel()
 	changed, err := p.Queries.ReleaseNotification(queryCtx, store.ReleaseNotificationParams{ID: notification.ID, Attempts: notification.Attempts})
-	p.checkWrite(ctx, notification, "pending", "", changed, err)
+	if p.checkWrite(ctx, notification, "pending", "", changed, err) {
+		p.Events.Publish(ctx, events.New(notification.ID, notification.BatchID, "pending", notification.Attempts-1))
+	}
 }
 
 func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string], notification store.Notification) {
@@ -198,6 +207,7 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 		})
 		if p.checkWrite(ctx, notification, "sent", messageID, changed, err) {
 			p.Metrics.Sent(p.Channel, time.Since(notification.CreatedAt))
+			p.Events.Publish(ctx, events.New(notification.ID, notification.BatchID, "sent", notification.Attempts))
 		}
 		return
 	}
@@ -208,6 +218,7 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 		changed, err := p.Queries.MarkFailed(queryCtx, store.MarkFailedParams{ID: notification.ID, Attempts: notification.Attempts, Error: sendErr.Error()})
 		if p.checkWrite(ctx, notification, "failed", "", changed, err) {
 			p.Metrics.Failed(p.Channel)
+			p.Events.Publish(ctx, events.New(notification.ID, notification.BatchID, "failed", notification.Attempts))
 		}
 		return
 	}
@@ -221,6 +232,7 @@ func (p Pool) send(ctx context.Context, breaker *gobreaker.CircuitBreaker[string
 	})
 	if p.checkWrite(ctx, notification, "pending", "", changed, err) {
 		p.Metrics.Retried(p.Channel)
+		p.Events.Publish(ctx, events.New(notification.ID, notification.BatchID, "pending", notification.Attempts))
 	}
 }
 

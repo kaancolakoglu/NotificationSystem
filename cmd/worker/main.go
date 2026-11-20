@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
 	"github.com/kaancolakoglu/NotificationSystem/internal/ratelimit"
@@ -105,6 +106,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 	queries := store.New(pool)
 	limiter := ratelimit.New(redisClient, sendsPerSecond, sendBurst)
 	client := provider.New(providerURL, len(channels)*poolSize, logger)
+	publisher := events.Publisher{Client: redisClient, Logger: logger}
 	var loops sync.WaitGroup
 	for _, channel := range channels {
 		loops.Go(func() {
@@ -114,6 +116,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 				Limiter:         limiter,
 				Logger:          logger,
 				Metrics:         metrics,
+				Events:          publisher,
 				Channel:         channel,
 				Size:            poolSize,
 				Interval:        pollInterval,
@@ -129,6 +132,7 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL, provid
 			Queries:      queries,
 			Logger:       logger,
 			Metrics:      metrics,
+			Events:       publisher,
 			Interval:     sweepInterval,
 			QueryTimeout: timeout,
 		}.Run(ctx)

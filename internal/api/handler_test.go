@@ -17,15 +17,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
+	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
+	"github.com/kaancolakoglu/NotificationSystem/internal/testredis"
 )
 
 func newTestServer(t *testing.T) (*http.ServeMux, *pgxpool.Pool) {
 	t.Helper()
 	pool := testdb.New(t)
+	logger := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
-	api.Register(mux, pool, slog.New(slog.DiscardHandler))
+	api.Register(mux, pool, nil, events.Publisher{Client: testredis.New(t), Logger: logger}, logger)
 	return mux, pool
 }
 

@@ -3,6 +3,7 @@ module github.com/kaancolakoglu/NotificationSystem
 go 1.27.4
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/go-redis/redis_rate/v10 v10.0.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.13.0

@@ -136,7 +136,7 @@ func TestReadyz(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			handler := newHandler(tt.postgres(t), tt.redis(t), obs.NewLogger(&logs))
+			handler := newHandler(tt.postgres(t), tt.redis(t), nil, obs.NewLogger(&logs))
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			if tt.callerGaveUp {
@@ -190,7 +190,7 @@ func TestMetricsReportTheQueue(t *testing.T) {
 	insert("email", 2, "")
 	var logs bytes.Buffer
 
-	rec := get(t, newHandler(db, nil, obs.NewLogger(&logs)), "/metrics")
+	rec := get(t, newHandler(db, nil, nil, obs.NewLogger(&logs)), "/metrics")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body)
@@ -233,7 +233,7 @@ func TestMetricsReportTheQueue(t *testing.T) {
 
 func TestMetricsAreServedWithoutTheQueueWhenTheDatabaseIsDown(t *testing.T) {
 	var logs bytes.Buffer
-	handler := newHandler(unreachablePostgres(t), nil, obs.NewLogger(&logs))
+	handler := newHandler(unreachablePostgres(t), nil, nil, obs.NewLogger(&logs))
 
 	first := get(t, handler, "/metrics")
 	second := get(t, handler, "/metrics")

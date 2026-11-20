@@ -14,6 +14,7 @@ import (
 
 	spec "github.com/kaancolakoglu/NotificationSystem/api"
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
+	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 )
@@ -64,7 +65,9 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, redisURL string)
 		}
 	}()
 
-	return newServer(pool, redisClient, logger).ListenAndServe()
+	hub := events.NewHub(redisClient, logger)
+	go hub.Run(ctx)
+	return newServer(pool, redisClient, hub, logger).ListenAndServe()
 }
 
 func parseRedisURL(redisURL string) (*redis.Options, error) {
@@ -76,16 +79,16 @@ func parseRedisURL(redisURL string) (*redis.Options, error) {
 	return options, nil
 }
 
-func newServer(pool *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logger) *http.Server {
+func newServer(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, logger *slog.Logger) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           newHandler(pool, redisClient, logger),
+		Handler:           newHandler(pool, redisClient, hub, logger),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 }
 
-func newHandler(pool *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logger) http.Handler {
+func newHandler(pool *pgxpool.Pool, redisClient *redis.Client, hub *events.Hub, logger *slog.Logger) http.Handler {
 	registry := obs.NewRegistry()
 	registry.MustRegister(obs.QueueCollector{Queries: store.New(pool), Channels: channels, Timeout: queueCountTimeout})
 
@@ -120,7 +123,7 @@ func newHandler(pool *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logg
 			logger.ErrorContext(r.Context(), "write openapi spec", "error", err)
 		}
 	})
-	api.Register(mux, pool, logger)
+	api.Register(mux, pool, hub, events.Publisher{Client: redisClient, Logger: logger}, logger)
 
 	limited := http.NewServeMux()
 	limited.Handle("/", http.MaxBytesHandler(mux, maxBodyBytes))

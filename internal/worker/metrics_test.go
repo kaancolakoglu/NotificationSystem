@@ -183,7 +183,7 @@ func TestSweptNotificationsAreCounted(t *testing.T) {
 	}
 	metrics, reader := newMetrics()
 
-	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: metrics, Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(t.Context())
+	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: metrics, Events: unreadEvents(t), Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(t.Context())
 
 	reader.check(t, map[string]float64{
 		`notifications_failed_total{channel="sms"}`:  1,

@@ -189,6 +189,9 @@ func runSweeper(t *testing.T, sweeper Sweeper) {
 	if sweeper.Metrics == nil {
 		sweeper.Metrics = unreadMetrics()
 	}
+	if sweeper.Events.Client == nil {
+		sweeper.Events = unreadEvents(t)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -201,6 +204,9 @@ func runPool(t *testing.T, pool Pool) (stop context.CancelFunc, stopped <-chan s
 	t.Helper()
 	if pool.Metrics == nil {
 		pool.Metrics = unreadMetrics()
+	}
+	if pool.Events.Client == nil {
+		pool.Events = unreadEvents(t)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -703,7 +709,7 @@ func TestResultForARowThatIsNotProcessingIsLogged(t *testing.T) {
 	queries := store.New(db)
 	_, client := newProvider(t, accept)
 	var logs bytes.Buffer
-	pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: unreadMetrics(), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
+	pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: unreadMetrics(), Events: unreadEvents(t), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
 	pending := insert(t, queries, "sms", 1)
 
 	pool.send(t.Context(), pool.newBreaker(t.Context()), pending)
@@ -859,7 +865,7 @@ func TestExpiredLeaseBeforeTheLastAttemptGoesBackToPending(t *testing.T) {
 	lost := insert(t, queries, "sms", 1)
 	hold(t, db, lost.ID, maxAttempts-1, "-1 second")
 
-	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(t.Context())
+	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), Events: unreadEvents(t), Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(t.Context())
 
 	if stored := get(t, queries, lost.ID); stored.Status != "pending" || stored.Attempts != maxAttempts-1 {
 		t.Errorf("status = %q, attempts = %d, want pending and %d, with one attempt left", stored.Status, stored.Attempts, maxAttempts-1)
@@ -883,7 +889,7 @@ func TestStaleResultWriteChangesNothing(t *testing.T) {
 			_, client := newProvider(t, tt.answer)
 			var logs bytes.Buffer
 			metrics, reader := newMetrics()
-			pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: metrics, Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
+			pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: metrics, Events: unreadEvents(t), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
 			created := insert(t, queries, "sms", 1)
 			claim := func() store.Notification {
 				t.Helper()
@@ -895,7 +901,7 @@ func TestStaleResultWriteChangesNothing(t *testing.T) {
 			}
 			stale := claim()
 			hold(t, db, created.ID, stale.Attempts, "-1 second")
-			Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), QueryTimeout: queryTimeout}.sweep(t.Context())
+			Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), Events: unreadEvents(t), QueryTimeout: queryTimeout}.sweep(t.Context())
 			current := claim()
 			if stale.Attempts != 1 || current.Attempts != 2 {
 				t.Fatalf("attempts of the two claims = %d and %d, want 1 and 2", stale.Attempts, current.Attempts)

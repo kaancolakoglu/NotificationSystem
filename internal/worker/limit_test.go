@@ -207,7 +207,7 @@ func TestStaleReleaseChangesNothing(t *testing.T) {
 	db := testdb.New(t)
 	queries := store.New(db)
 	var logs syncBuffer
-	pool := Pool{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", QueryTimeout: queryTimeout}
+	pool := Pool{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Events: unreadEvents(t), Channel: "sms", QueryTimeout: queryTimeout}
 	created := insert(t, queries, "sms", 1)
 	claim := func() store.Notification {
 		t.Helper()
@@ -219,7 +219,7 @@ func TestStaleReleaseChangesNothing(t *testing.T) {
 	}
 	stale := claim()
 	hold(t, db, created.ID, stale.Attempts, "-1 second")
-	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), QueryTimeout: queryTimeout}.sweep(t.Context())
+	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Metrics: unreadMetrics(), Events: unreadEvents(t), QueryTimeout: queryTimeout}.sweep(t.Context())
 	swept := get(t, queries, created.ID)
 
 	pool.release(t.Context(), stale, slog.LevelError, "releasing the notification", errors.New("redis is down"))

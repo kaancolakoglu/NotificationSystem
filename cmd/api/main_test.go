@@ -17,7 +17,7 @@ func TestHealthz(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
 
-	newHandler(nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+	newHandler(nil, nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -28,7 +28,7 @@ func TestOpenAPISpec(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/openapi.yaml", nil)
 
-	newHandler(nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+	newHandler(nil, nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -43,7 +43,7 @@ func TestOpenAPISpec(t *testing.T) {
 
 func TestServerWritesItsOwnMessagesAsJSONLines(t *testing.T) {
 	var logs bytes.Buffer
-	server := newServer(nil, nil, obs.NewLogger(&logs))
+	server := newServer(nil, nil, nil, obs.NewLogger(&logs))
 	if server.ErrorLog == nil {
 		t.Fatal("the server has no error log, so net/http prints plain text to stderr")
 	}
@@ -78,7 +78,7 @@ func TestOnlyV1RequestsAreLoggedAndGetACorrelationID(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, tt.target, nil)
 
-			newHandler(nil, nil, obs.NewLogger(&logs)).ServeHTTP(rec, req)
+			newHandler(nil, nil, nil, obs.NewLogger(&logs)).ServeHTTP(rec, req)
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d, body %s", rec.Code, tt.wantStatus, rec.Body)
@@ -102,7 +102,7 @@ func TestBodyOverLimitIsRejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications", strings.NewReader(body))
 
-	newHandler(nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+	newHandler(nil, nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
@@ -118,7 +118,7 @@ func TestBatchBodyLimit(t *testing.T) {
 		body := `{"notifications":[{"recipient":"user@example.com","channel":"email","content":"` + strings.Repeat("a", contentBytes) + `"}]}`
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/notifications/batch", strings.NewReader(body))
-		newHandler(nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+		newHandler(nil, nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
 		return rec
 	}
 
@@ -163,7 +163,7 @@ func TestQueryParametersAreCheckedPerRoute(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequestWithContext(t.Context(), tt.method, tt.target, nil)
 
-			newHandler(nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
+			newHandler(nil, nil, nil, slog.New(slog.DiscardHandler)).ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want %d, body %s", rec.Code, http.StatusBadRequest, rec.Body)

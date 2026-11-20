@@ -4,3 +4,7 @@ generate:
   models: true
   std-http-server: true
   strict-server: true
+output-options:
+  exclude-operation-ids:
+    - streamNotificationEvents
+    - streamBatchEvents

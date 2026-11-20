@@ -657,12 +657,12 @@ WITH swept AS (
     SET status = CASE WHEN attempts >= $1::smallint THEN 'failed' ELSE 'pending' END,
         last_error = $2::text
     WHERE status = 'processing' AND locked_until < now()
-    RETURNING id, channel, status, attempts, last_error, correlation_id
+    RETURNING id, channel, status, attempts, last_error, correlation_id, batch_id
 ), recorded AS (
     INSERT INTO delivery_attempts (notification_id, attempt, error)
     SELECT id, attempts, last_error FROM swept
 )
-SELECT id, channel, status, attempts, correlation_id FROM swept
+SELECT id, channel, status, attempts, correlation_id, batch_id FROM swept
 `
 
 type SweepExpiredLeasesParams struct {
@@ -676,6 +676,7 @@ type SweepExpiredLeasesRow struct {
 	Status        string
 	Attempts      int16
 	CorrelationID pgtype.Text
+	BatchID       pgtype.UUID
 }
 
 func (q *Queries) SweepExpiredLeases(ctx context.Context, arg SweepExpiredLeasesParams) ([]SweepExpiredLeasesRow, error) {
@@ -693,6 +694,7 @@ func (q *Queries) SweepExpiredLeases(ctx context.Context, arg SweepExpiredLeases
 			&i.Status,
 			&i.Attempts,
 			&i.CorrelationID,
+			&i.BatchID,
 		); err != nil {
 			return nil, err
 		}

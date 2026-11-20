@@ -12,9 +12,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/api"
+	"github.com/kaancolakoglu/NotificationSystem/internal/events"
 	"github.com/kaancolakoglu/NotificationSystem/internal/obs"
 	"github.com/kaancolakoglu/NotificationSystem/internal/store"
 	"github.com/kaancolakoglu/NotificationSystem/internal/testdb"
+	"github.com/kaancolakoglu/NotificationSystem/internal/testredis"
 )
 
 const (
@@ -27,8 +29,9 @@ func newLoggedServer(t *testing.T) (*http.ServeMux, *pgxpool.Pool, *bytes.Buffer
 	t.Helper()
 	pool := testdb.New(t)
 	var logs bytes.Buffer
+	logger := obs.NewLogger(&logs)
 	mux := http.NewServeMux()
-	api.Register(mux, pool, obs.NewLogger(&logs))
+	api.Register(mux, pool, nil, events.Publisher{Client: testredis.New(t), Logger: logger}, logger)
 	return mux, pool, &logs
 }
 

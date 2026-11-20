@@ -299,7 +299,7 @@ func TestRowTheBreakerRefusesIsReleased(t *testing.T) {
 			queries := store.New(db)
 			fake, client := newProvider(t, accept)
 			var logs syncBuffer
-			pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: unreadMetrics(), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Minute}
+			pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Metrics: unreadMetrics(), Events: unreadEvents(t), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Minute}
 			if tt.halfOpen {
 				pool.BreakerOpenFor = openFor
 			}

@@ -298,6 +298,77 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/notifications/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
+    get:
+      operationId: streamNotificationEvents
+      summary: Stream the status changes of a notification over WebSocket
+      description: >-
+        A WebSocket endpoint. After the upgrade the server sends one text
+        message for each status change of a notification: a StatusEvent
+        as JSON.
+        The client sends nothing, and a data message from the client
+        closes the connection. Events are best effort and a stream has no
+        history. So connect first, then fetch the status, and fetch it
+        again after every reconnect. Events of one notification can
+        arrive out of order. sent, failed and cancelled are final:
+        ignore what arrives after one of them. The server closes the
+        stream with code 1013 when events may have been missed: when it
+        lost its connection to Redis, or when 256 events wait for the
+        client. A client that reads nothing for 5 s is cut off without a
+        close code. A handshake that is refused is answered in plain
+        text, not with an Error object.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "101":
+          description: >-
+            The connection is now a WebSocket that carries StatusEvent
+            messages.
+        "400":
+          description: >-
+            The id is not a UUID, a query parameter was sent, or the
+            X-Correlation-ID is not valid. A WebSocket handshake that
+            is not valid is 400 too, in plain text.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: >-
+            The Origin header names another host or port than the Host
+            header, as a browser page of another site does. Answered in
+            plain text.
+        "404":
+          description: No notification has this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "426":
+          description: >-
+            The request does not ask for an upgrade to WebSocket.
+            Answered in plain text.
+        "500":
+          description: The server failed to read the notification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: >-
+            The server is not connected to Redis, so it has no events to
+            send. Try again later.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/templates:
     parameters:
       - $ref: "#/components/parameters/CorrelationId"
@@ -387,6 +458,77 @@ paths:
                 $ref: "#/components/schemas/Error"
         "500":
           description: The server failed to read the batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/batches/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
+    get:
+      operationId: streamBatchEvents
+      summary: Stream the status changes of a batch over WebSocket
+      description: >-
+        A WebSocket endpoint. After the upgrade the server sends one text
+        message for each status change of every notification of a batch:
+        a StatusEvent as JSON.
+        The client sends nothing, and a data message from the client
+        closes the connection. Events are best effort and a stream has no
+        history. So connect first, then fetch the status, and fetch it
+        again after every reconnect. Events of one notification can
+        arrive out of order. sent, failed and cancelled are final:
+        ignore what arrives after one of them. The server closes the
+        stream with code 1013 when events may have been missed: when it
+        lost its connection to Redis, or when 256 events wait for the
+        client. A client that reads nothing for 5 s is cut off without a
+        close code. A handshake that is refused is answered in plain
+        text, not with an Error object.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "101":
+          description: >-
+            The connection is now a WebSocket that carries StatusEvent
+            messages.
+        "400":
+          description: >-
+            The id is not a UUID, a query parameter was sent, or the
+            X-Correlation-ID is not valid. A WebSocket handshake that
+            is not valid is 400 too, in plain text.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: >-
+            The Origin header names another host or port than the Host
+            header, as a browser page of another site does. Answered in
+            plain text.
+        "404":
+          description: No batch has this id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "426":
+          description: >-
+            The request does not ask for an upgrade to WebSocket.
+            Answered in plain text.
+        "500":
+          description: The server failed to read the batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: >-
+            The server is not connected to Redis, so it has no events to
+            send. Try again later.
           content:
             application/json:
               schema:
@@ -652,6 +794,31 @@ components:
         cancelled:
           type: integer
           format: int64
+    StatusEvent:
+      type: object
+      description: >-
+        One status change of a notification, sent as a text message on a
+        WebSocket stream. A notification that is created is not an event.
+      required: [notification_id, status, attempts]
+      properties:
+        notification_id:
+          type: string
+          format: uuid
+        batch_id:
+          type: string
+          format: uuid
+          description: Present when the notification was created in a batch.
+        status:
+          allOf:
+            - $ref: "#/components/schemas/Status"
+          description: The status the notification changed to.
+        attempts:
+          type: integer
+          description: >-
+            The attempts of the notification after the change. A
+            notification that a worker gave up before its provider call
+            has the attempt refunded. One whose attempt was lost keeps
+            it.
     Error:
       type: object
       required: [message]
