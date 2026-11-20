@@ -71,6 +71,10 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
 	handler := NewStrictHandlerWithOptions(&server{pool: pool, queries: store.New(pool)}, nil, StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: requestErrorHandler,
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			if response, ok := w.(*startedResponse); ok && response.status != 0 {
+				logger.ErrorContext(r.Context(), "write response", "method", r.Method, "path", r.URL.Path, "status", response.status, "error", err)
+				return
+			}
 			logger.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 			writeError(r.Context(), w, logger, http.StatusInternalServerError, "internal error")
 		},
@@ -78,7 +82,23 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, logger *slog.Logger) {
 	HandlerWithOptions(handler, StdHTTPServerOptions{
 		BaseRouter:       mux,
 		ErrorHandlerFunc: requestErrorHandler,
-		Middlewares:      []MiddlewareFunc{checkQueryParameters(logger)},
+		Middlewares:      []MiddlewareFunc{checkQueryParameters(logger), trackResponseStart},
+	})
+}
+
+type startedResponse struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *startedResponse) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func trackResponseStart(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&startedResponse{ResponseWriter: w}, r)
 	})
 }
 
