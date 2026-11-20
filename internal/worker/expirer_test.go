@@ -41,7 +41,7 @@ func runExpirer(t *testing.T, expirer KeyExpirer) {
 		defer close(done)
 		expirer.Run(t.Context())
 	}()
-	t.Cleanup(func() { <-done })
+	t.Cleanup(func() { waitToReceive(t, "the key expiry stops", done) })
 }
 
 func TestKeysOlderThan24HoursAreDeleted(t *testing.T) {

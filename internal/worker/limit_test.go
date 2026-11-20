@@ -40,13 +40,19 @@ func TestThreePoolsSendAtMostTheLimitPerSecond(t *testing.T) {
 	db := testdb.New(t)
 	queries := store.New(db)
 	fake, client := newProvider(t, accept)
-	limiter := ratelimit.New(testredis.New(t), sendsPerSecond, sendBurst)
+	shared := testredis.New(t).Options()
 	for range rows {
 		insert(t, queries, "sms", 1)
 	}
 
 	for range 3 {
-		runPool(t, Pool{Queries: queries, Provider: client, Limiter: limiter, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 20, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+		ownClient := redis.NewClient(&redis.Options{Addr: shared.Addr, DB: shared.DB})
+		t.Cleanup(func() {
+			if err := ownClient.Close(); err != nil {
+				t.Errorf("close redis client: %v", err)
+			}
+		})
+		runPool(t, Pool{Queries: queries, Provider: client, Limiter: ratelimit.New(ownClient, sendsPerSecond, sendBurst), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 20, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
 	}
 	waitFor(t, "every notification is sent", func() bool { return countByStatus(t, db, "sent") == rows })
 
@@ -236,5 +242,8 @@ func TestStaleReleaseChangesNothing(t *testing.T) {
 
 	if stored := get(t, queries, created.ID); stored.Status != "pending" || stored.Attempts != 1 {
 		t.Errorf("after the release by the attempt that holds it: status = %q, attempts = %d, want pending and 1", stored.Status, stored.Attempts)
+	}
+	if again := claim(); again.Attempts != current.Attempts {
+		t.Errorf("claim right after the release is attempt %d, want %d again", again.Attempts, current.Attempts)
 	}
 }

@@ -31,6 +31,7 @@ const (
 	pollInterval = 5 * time.Millisecond
 	queryTimeout = 5 * time.Second
 	backoffBase  = time.Millisecond
+	waitTimeout  = 20 * time.Second
 )
 
 type syncBuffer struct {
@@ -188,7 +189,7 @@ func runSweeper(t *testing.T, sweeper Sweeper) {
 		defer close(done)
 		sweeper.Run(t.Context())
 	}()
-	t.Cleanup(func() { <-done })
+	t.Cleanup(func() { waitToReceive(t, "the sweeper stops", done) })
 }
 
 func runPool(t *testing.T, pool Pool) (stop context.CancelFunc, stopped <-chan struct{}) {
@@ -201,7 +202,7 @@ func runPool(t *testing.T, pool Pool) (stop context.CancelFunc, stopped <-chan s
 	}()
 	t.Cleanup(func() {
 		cancel()
-		<-done
+		waitToReceive(t, "the pool stops", done)
 	})
 	return cancel, done
 }
@@ -241,12 +242,21 @@ func countByStatus(t *testing.T, db *pgxpool.Pool, status string) int {
 
 func waitFor(t *testing.T, what string, done func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(waitTimeout)
 	for !done() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting until %s", what)
 		}
 		time.Sleep(pollInterval)
+	}
+}
+
+func waitToReceive(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(waitTimeout):
+		t.Fatalf("timed out waiting until %s", what)
 	}
 }
 
@@ -687,7 +697,7 @@ func TestResultWriteGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			case <-time.After(20 * time.Second):
+			case <-time.After(waitTimeout):
 				t.Fatal("timed out waiting for the provider request")
 			}
 			waitFor(t, "the result write gives up", func() bool {

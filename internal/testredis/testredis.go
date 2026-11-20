@@ -35,6 +35,9 @@ func New(t *testing.T) *redis.Client {
 	if sharedURL == "" {
 		sharedURL = url(t, start(context.WithoutCancel(t.Context()), t))
 	}
+	if used == databases-1 {
+		t.Fatalf("this test binary has used all %d Redis databases, one per test: run fewer tests at once, for example with a smaller -count", used)
+	}
 	used++
 	return connect(t, sharedURL, used)
 }

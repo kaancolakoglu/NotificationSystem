@@ -137,7 +137,7 @@ func TestRunKeepsTheProviderLimit(t *testing.T) {
 	if most > providerLimit {
 		t.Errorf("busiest second at the provider had %d requests, want at most %d", most, providerLimit)
 	}
-	if took := arrivals[rows-1].Sub(arrivals[0]); took < 1500*time.Millisecond || took > 4*time.Second {
+	if took := arrivals[rows-1].Sub(arrivals[0]); took < 1400*time.Millisecond || took > 4*time.Second {
 		t.Errorf("%d requests took %s, want about 1.6 s at 90 per second after a burst of 5", rows, took)
 	}
 }

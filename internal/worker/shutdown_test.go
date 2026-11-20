@@ -19,15 +19,6 @@ const (
 	sendsCutOff    = `"msg":"shutdown deadline passed, cancelling the sends in flight"`
 )
 
-func waitToReceive(t *testing.T, what string, ch <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(20 * time.Second):
-		t.Fatalf("timed out waiting until %s", what)
-	}
-}
-
 func TestShutdownLetsASendInFlightFinishAndClaimsNothingMore(t *testing.T) {
 	db := testdb.New(t)
 	queries := store.New(db)
