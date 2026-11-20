@@ -43,14 +43,16 @@ func requireStillOpen(t *testing.T, logs *syncBuffer) {
 
 func TestBreakerOpensAfterFiveFailuresAndClosesWhenTheProviderRecovers(t *testing.T) {
 	const (
-		rows    = 10
-		openFor = 3 * time.Second
+		rows       = 10
+		openFor    = 3 * time.Second
+		slowAnswer = 50 * time.Millisecond
 	)
 	db := testdb.New(t)
 	queries := store.New(db)
 	var healthy atomic.Bool
 	fake, client := newProvider(t, func(w http.ResponseWriter) error {
 		if healthy.Load() {
+			time.Sleep(slowAnswer)
 			return accept(w)
 		}
 		return status(http.StatusInternalServerError)(w)
@@ -100,6 +102,9 @@ func TestBreakerOpensAfterFiveFailuresAndClosesWhenTheProviderRecovers(t *testin
 		if lines := logs.linesWith(`"level":"WARN"`, breakerChanged, `"channel":"sms"`, `"from":"`+change.from+`"`, `"to":"`+change.to+`"`); lines != 1 {
 			t.Errorf("logs have %d lines for the breaker going from %s to %s, want 1", lines, change.from, change.to)
 		}
+	}
+	if logs.lineWith(`"msg":"claim notifications"`) {
+		t.Error("a claim failed while the pool held more rows than trial calls were left, want no claim then")
 	}
 }
 
@@ -161,7 +166,7 @@ func TestHalfOpenBreakerClaimsNoRowAfterItsThreeTrialCallsStarted(t *testing.T) 
 	}
 	var logs syncBuffer
 
-	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: breakerTrialCalls, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Second})
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: rows, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase, BreakerOpenFor: time.Second})
 	waitFor(t, "the breaker opens", func() bool { return logs.lineWith(breakerChanged, `"from":"closed"`, `"to":"open"`) })
 	healthy.Store(true)
 	waitFor(t, "every notification is pending again", func() bool { return countByStatus(t, db, "pending") == rows })
@@ -177,9 +182,6 @@ func TestHalfOpenBreakerClaimsNoRowAfterItsThreeTrialCallsStarted(t *testing.T) 
 	}
 	if logs.lineWith(breakerChanged, `"from":"half-open"`, `"to":"open"`) {
 		t.Error("the breaker opened again, want every trial call to succeed")
-	}
-	if logs.lineWith(`"msg":"claim notifications"`) {
-		t.Error("a claim failed while the pool held more rows than trial calls were left, want no claim then")
 	}
 }
 
