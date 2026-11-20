@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,27 @@ func TestOpenAPISpec(t *testing.T) {
 	}
 	if !bytes.Equal(rec.Body.Bytes(), spec.Spec) {
 		t.Error("body is not the embedded spec")
+	}
+}
+
+func TestServerWritesItsOwnMessagesAsJSONLines(t *testing.T) {
+	var logs bytes.Buffer
+	server := newServer(nil, obs.NewLogger(&logs))
+	if server.ErrorLog == nil {
+		t.Fatal("the server has no error log, so net/http prints plain text to stderr")
+	}
+
+	server.ErrorLog.Print("http: panic serving 127.0.0.1:1: boom")
+
+	var line struct {
+		Level string `json:"level"`
+		Msg   string `json:"msg"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &line); err != nil {
+		t.Fatalf("logs = %q, want one JSON line: %v", logs.String(), err)
+	}
+	if line.Level != "ERROR" || line.Msg != "http: panic serving 127.0.0.1:1: boom" {
+		t.Errorf("line = %+v, want level ERROR and the message as written", line)
 	}
 }
 

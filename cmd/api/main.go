@@ -46,12 +46,16 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL string) error {
 		return fmt.Errorf("ping database: %w", err)
 	}
 
-	server := &http.Server{
+	return newServer(pool, logger).ListenAndServe()
+}
+
+func newServer(pool *pgxpool.Pool, logger *slog.Logger) *http.Server {
+	return &http.Server{
 		Addr:              addr,
 		Handler:           newHandler(pool, logger),
 		ReadHeaderTimeout: readHeaderTimeout,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
-	return server.ListenAndServe()
 }
 
 func newHandler(pool *pgxpool.Pool, logger *slog.Logger) http.Handler {

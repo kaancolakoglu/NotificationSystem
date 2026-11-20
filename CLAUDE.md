@@ -340,7 +340,10 @@ These are settled. Raise it before changing one.
   `failed`. A notification sent without a problem is not logged. Reason:
   at 300 per second that is 26 million lines a day, and a count belongs
   in metrics. go-redis's own messages are written as JSON lines at warn
-  level. Reason: it printed plain text to stderr.
+  level. Reason: it printed plain text to stderr. The messages of the
+  API's HTTP server itself, such as a handler that panicked, are JSON
+  lines at error level, without a correlation id. Reason: it printed
+  plain text to stderr too.
 
 ## Design reference
 
