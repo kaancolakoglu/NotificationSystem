@@ -74,3 +74,18 @@ services:
         condition: service_healthy
       fakeprovider:
         condition: service_healthy
+
+  k6:
+    image: grafana/k6:2.4.0
+    profiles: ["loadtest"]
+    volumes:
+      - ./loadtest:/scripts:ro
+    environment:
+      - API_URL=http://api:8080
+      - RATE
+      - DURATION
+      - BATCH
+      - ROWS
+      - BACKLOG
+      - STREAMS
+      - DUE_AFTER

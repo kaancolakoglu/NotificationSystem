@@ -589,6 +589,8 @@ internal/ratelimit
 internal/obs        logging, metrics, tracing
 internal/events     status events: publisher, hub of the streams
 migrations/
+loadtest/           k6 scripts and the latency query
+docs/load-test.md   how the load test was run, and its results
 ```
 
 ### States
@@ -651,7 +653,20 @@ GET  /healthz   GET /readyz   GET /metrics   GET /openapi.yaml
 
 - Make targets: `fmt`, `lint`, `test` (everything, with `-race`),
   `test-short` (unit only), `test-isolated`, `check` (lint and test),
-  `generate`, `up`, `down`.
+  `generate`, `up`, `down`, `loadtest`, `loadtest-latency`.
+- Load tests are k6 scripts in `loadtest/`, run by the `k6` service of
+  compose (`grafana/k6`, behind the profile `loadtest`, so `make up` does
+  not start it). `make loadtest script=<name>` empties the notification
+  tables of the compose database, then runs `loadtest/<name>.js` inside
+  the compose network. Reason for emptying: rows left by another run would
+  share the sending rate with this one, and `make loadtest-latency` reads
+  the whole table. Reason for
+  the network: on macOS, traffic from the host into Docker takes a
+  slower path. Settings such as `RATE` are passed as make variables.
+  A run exits with an error if a request failed, a notification was not
+  sent or a channel did not drain.
+  `make loadtest-latency` prints the delivery times the database stored.
+  The method and the results are in `docs/load-test.md`.
 - Integration tests skip under `-short`. No build tags.
 - Database tests in one package share one Postgres container, and each
   test gets its own database in it. Reason: a container per test took 1 s
