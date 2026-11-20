@@ -421,33 +421,50 @@ func TestNotificationFailsWhenAttemptsAreUsedUp(t *testing.T) {
 }
 
 func TestBackoffGrowsWithTheAttempt(t *testing.T) {
-	const rows = 30
+	const (
+		rows = 30
+		base = 365 * 24 * time.Hour
+	)
 	db := testdb.New(t)
 	queries := store.New(db)
 	_, client := newProvider(t, status(http.StatusTooManyRequests))
-	ids := make([]uuid.UUID, rows)
-	for i := range ids {
-		ids[i] = insert(t, queries, "sms", 1).ID
+	ids := map[int16][]uuid.UUID{}
+	for attempt := int16(1); attempt < maxAttempts; attempt++ {
+		for range rows {
+			id := insert(t, queries, "sms", 1).ID
+			if _, err := db.Exec(t.Context(), "UPDATE notifications SET attempts = $2 WHERE id = $1", id, attempt-1); err != nil {
+				t.Fatalf("set the attempts already made: %v", err)
+			}
+			ids[attempt] = append(ids[attempt], id)
+		}
 	}
 
-	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 10, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
-	waitFor(t, "every notification is failed", func() bool { return countByStatus(t, db, "failed") == rows })
+	runPool(t, Pool{Queries: queries, Provider: client, Limiter: unlimited(t), Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 10, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: base})
+	waitFor(t, "every notification has failed once", func() bool {
+		var failed int
+		if err := db.QueryRow(t.Context(), "SELECT count(*) FROM delivery_attempts").Scan(&failed); err != nil {
+			t.Fatalf("count delivery attempts: %v", err)
+		}
+		return failed == len(ids)*rows
+	})
 
-	const ceiling = backoffBase << 4
-	var longest time.Duration
-	for _, id := range ids {
-		history := attempts(t, queries, id)
-		if len(history) != maxAttempts {
-			t.Fatalf("delivery attempts = %+v, want %d of them", history, maxAttempts)
+	for attempt, group := range ids {
+		ceiling := base << attempt
+		shortest, longest := ceiling, time.Duration(0)
+		for _, id := range group {
+			history := attempts(t, queries, id)
+			if len(history) != 1 || history[0].Attempt != attempt {
+				t.Fatalf("delivery attempts = %+v, want one, number %d", history, attempt)
+			}
+			delay := get(t, queries, id).NextAttemptAt.Sub(history[0].CreatedAt)
+			if delay < 0 || delay >= ceiling {
+				t.Errorf("delay after attempt %d = %s, want 0 up to %s", attempt, delay, ceiling)
+			}
+			shortest, longest = min(shortest, delay), max(longest, delay)
 		}
-		delay := get(t, queries, id).NextAttemptAt.Sub(history[3].CreatedAt)
-		if delay < 0 || delay >= ceiling {
-			t.Errorf("delay after attempt 4 = %s, want 0 up to %s", delay, ceiling)
+		if shortest >= ceiling/2 || longest < ceiling/2 {
+			t.Errorf("%d delays after attempt %d run from %s to %s, want some on each side of %s", rows, attempt, shortest, longest, ceiling/2)
 		}
-		longest = max(longest, delay)
-	}
-	if longest < ceiling/2 {
-		t.Errorf("longest of %d delays after attempt 4 = %s, want some above %s", rows, longest, ceiling/2)
 	}
 }
 
@@ -478,16 +495,16 @@ func TestRetryWaitsForRetryAfter(t *testing.T) {
 func TestRetryDelay(t *testing.T) {
 	const samples = 2000
 	for attempt, ceiling := range map[int16]time.Duration{1: 2 * time.Second, 2: 4 * time.Second, 3: 8 * time.Second, 4: 16 * time.Second} {
-		var longest time.Duration
+		shortest, longest := ceiling, time.Duration(0)
 		for range samples {
 			delay := retryDelay(time.Second, attempt, 0)
 			if delay < 0 || delay >= ceiling {
 				t.Fatalf("delay after attempt %d = %s, want 0 up to %s", attempt, delay, ceiling)
 			}
-			longest = max(longest, delay)
+			shortest, longest = min(shortest, delay), max(longest, delay)
 		}
-		if longest < ceiling/2 {
-			t.Errorf("longest of %d delays after attempt %d = %s, want some above %s", samples, attempt, longest, ceiling/2)
+		if shortest >= ceiling/2 || longest < ceiling/2 {
+			t.Errorf("%d delays after attempt %d run from %s to %s, want some on each side of %s", samples, attempt, shortest, longest, ceiling/2)
 		}
 	}
 
@@ -795,6 +812,19 @@ func TestExpiredLeaseWithAttemptsUsedUpFails(t *testing.T) {
 	}
 	if !logs.lineWith(`"level":"ERROR"`, `"msg":"lease expired"`, `"notification_id":"`+lost.ID.String()+`"`, `"attempt":5`, `"status":"failed"`) {
 		t.Error("logs have no lease expired line for the notification")
+	}
+}
+
+func TestExpiredLeaseBeforeTheLastAttemptGoesBackToPending(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	lost := insert(t, queries, "sms", 1)
+	hold(t, db, lost.ID, maxAttempts-1, "-1 second")
+
+	Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), Interval: pollInterval, QueryTimeout: queryTimeout}.sweep(t.Context())
+
+	if stored := get(t, queries, lost.ID); stored.Status != "pending" || stored.Attempts != maxAttempts-1 {
+		t.Errorf("status = %q, attempts = %d, want pending and %d, with one attempt left", stored.Status, stored.Attempts, maxAttempts-1)
 	}
 }
 

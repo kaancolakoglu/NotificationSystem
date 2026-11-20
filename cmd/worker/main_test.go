@@ -187,6 +187,86 @@ func TestRunLetsASendInFlightFinishAfterItIsToldToStop(t *testing.T) {
 	}
 }
 
+func TestRunRetriesFailedSendsAfterTheBackoff(t *testing.T) {
+	const rows = 20
+	db := testdb.New(t)
+	queries := store.New(db)
+	var mu sync.Mutex
+	failed := map[string]bool{}
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("Idempotency-Key")
+		mu.Lock()
+		first := !failed[key]
+		failed[key] = true
+		mu.Unlock()
+		if first {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(provider.Close)
+	ids := make([]uuid.UUID, rows)
+	for i := range ids {
+		row, err := queries.InsertNotification(t.Context(), store.InsertNotificationParams{ID: uuid.Must(uuid.NewV7()), Recipient: "+905551234567", Channel: "sms", Content: "hello", Priority: 1})
+		if err != nil {
+			t.Fatalf("insert notification: %v", err)
+		}
+		ids[i] = row.ID
+	}
+
+	redisOptions := testredis.New(t).Options()
+	redisURL := fmt.Sprintf("redis://%s/%d", redisOptions.Addr, redisOptions.DB)
+	ctx, cancel := context.WithCancel(t.Context())
+	stopped := make(chan error, 1)
+	go func() {
+		stopped <- run(ctx, slog.New(slog.DiscardHandler), db.Config().ConnString(), redisURL, provider.URL, 5*time.Second)
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for _, id := range ids {
+		for {
+			row, err := queries.GetNotification(t.Context(), id)
+			if err != nil {
+				t.Fatalf("get notification: %v", err)
+			}
+			if row.Status == "sent" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("notification is %s with %d attempts, want sent", row.Status, row.Attempts)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	cancel()
+	if err := <-stopped; err != nil {
+		t.Errorf("run returned %v after it was told to stop, want no error", err)
+	}
+
+	var longest time.Duration
+	for _, id := range ids {
+		row, err := queries.GetNotification(t.Context(), id)
+		if err != nil {
+			t.Fatalf("get notification: %v", err)
+		}
+		history, err := queries.ListDeliveryAttempts(t.Context(), id)
+		if err != nil {
+			t.Fatalf("list delivery attempts: %v", err)
+		}
+		if row.Attempts != 2 || len(history) != 2 {
+			t.Fatalf("attempts = %d, delivery attempts = %+v, want 2 and two of them", row.Attempts, history)
+		}
+		delay := row.NextAttemptAt.Sub(history[0].CreatedAt)
+		if delay < 0 || delay >= 2*time.Second {
+			t.Errorf("retry delay after the first attempt = %s, want 0 up to 2 s", delay)
+		}
+		longest = max(longest, delay)
+	}
+	if longest < time.Second {
+		t.Errorf("longest of %d retry delays after the first attempt = %s, want some above 1 s", rows, longest)
+	}
+}
+
 func TestRunSendsANotificationOnEveryChannel(t *testing.T) {
 	db := testdb.New(t)
 	queries := store.New(db)

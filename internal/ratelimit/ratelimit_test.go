@@ -11,9 +11,9 @@ import (
 
 func TestWaitLetsTheBurstThroughThenKeepsTheRate(t *testing.T) {
 	const (
-		perSecond = 90
+		perSecond = 20
 		burst     = 5
-		tokens    = 50
+		tokens    = 15
 	)
 	limiter := New(testredis.New(t), perSecond, burst)
 

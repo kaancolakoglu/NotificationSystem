@@ -61,6 +61,21 @@ func TestKeysOlderThan24HoursAreDeleted(t *testing.T) {
 	})
 }
 
+func TestKeyExpiryLogsNothingWhenNoKeyIsExpired(t *testing.T) {
+	db := testdb.New(t)
+	storeKey(t, db, "kept", "23 hours")
+	var logs syncBuffer
+
+	KeyExpirer{Queries: store.New(db), Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout, MaxKeys: 10}.expire(t.Context())
+
+	if logs.lineWith(`"msg":`) {
+		t.Error("logs have a line for a run that deleted no key, want none")
+	}
+	if keys, want := storedKeys(t, db), []string{"kept"}; !slices.Equal(keys, want) {
+		t.Errorf("stored keys = %v, want %v", keys, want)
+	}
+}
+
 func TestOneRunDeletesAtMostMaxKeys(t *testing.T) {
 	db := testdb.New(t)
 	storeKey(t, db, "expired-1", "27 hours")
