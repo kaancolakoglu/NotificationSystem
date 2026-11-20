@@ -256,6 +256,36 @@ func (q *Queries) GetNotification(ctx context.Context, id uuid.UUID) (Notificati
 	return i, err
 }
 
+const getTemplates = `-- name: GetTemplates :many
+SELECT id, content FROM templates
+WHERE id = ANY ($1::uuid[])
+`
+
+type GetTemplatesRow struct {
+	ID      uuid.UUID
+	Content string
+}
+
+func (q *Queries) GetTemplates(ctx context.Context, ids []uuid.UUID) ([]GetTemplatesRow, error) {
+	rows, err := q.db.Query(ctx, getTemplates, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetTemplatesRow
+	for rows.Next() {
+		var i GetTemplatesRow
+		if err := rows.Scan(&i.ID, &i.Content); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 type InsertBatchNotificationsParams struct {
 	ID            uuid.UUID
 	Recipient     string
@@ -339,6 +369,24 @@ func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotification
 		&i.LockedUntil,
 		&i.CorrelationID,
 	)
+	return i, err
+}
+
+const insertTemplate = `-- name: InsertTemplate :one
+INSERT INTO templates (id, content)
+VALUES ($1, $2)
+RETURNING id, content, created_at
+`
+
+type InsertTemplateParams struct {
+	ID      uuid.UUID
+	Content string
+}
+
+func (q *Queries) InsertTemplate(ctx context.Context, arg InsertTemplateParams) (Template, error) {
+	row := q.db.QueryRow(ctx, insertTemplate, arg.ID, arg.Content)
+	var i Template
+	err := row.Scan(&i.ID, &i.Content, &i.CreatedAt)
 	return i, err
 }
 

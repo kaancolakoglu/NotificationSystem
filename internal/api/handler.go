@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -178,7 +179,11 @@ func (s *server) CreateNotification(ctx context.Context, request CreateNotificat
 	priority := priorityOf(body)
 	body.Priority = &priority
 
-	priorityValue, err := validateRequest(body, priority)
+	templates, err := s.templatesOf(ctx, []CreateNotificationRequest{body})
+	if err != nil {
+		return nil, err
+	}
+	priorityValue, content, err := validateRequest(body, priority, templates)
 	if err != nil {
 		return CreateNotification422JSONResponse{Message: err.Error()}, nil
 	}
@@ -196,7 +201,7 @@ func (s *server) CreateNotification(ctx context.Context, request CreateNotificat
 			ID:            id,
 			Recipient:     body.Recipient,
 			Channel:       string(body.Channel),
-			Content:       body.Content,
+			Content:       content,
 			Priority:      priorityValue,
 			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
 			ScheduledAt:   timestamptz(body.ScheduledAt),
@@ -225,6 +230,10 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 	if err != nil {
 		return nil, fmt.Errorf("generate batch id: %w", err)
 	}
+	templates, err := s.templatesOf(ctx, body.Notifications)
+	if err != nil {
+		return nil, err
+	}
 	results := make([]BatchItemResult, len(body.Notifications))
 	inserts := make([]store.InsertBatchNotificationsParams, 0, len(body.Notifications))
 	for i, item := range body.Notifications {
@@ -232,7 +241,7 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 		body.Notifications[i].Priority = &priority
 		results[i].Index = i
 
-		priorityValue, err := validateRequest(item, priority)
+		priorityValue, content, err := validateRequest(item, priority, templates)
 		if err != nil {
 			message := err.Error()
 			results[i].Error = &message
@@ -251,7 +260,7 @@ func (s *server) CreateBatch(ctx context.Context, request CreateBatchRequestObje
 			ID:            id,
 			Recipient:     item.Recipient,
 			Channel:       string(item.Channel),
-			Content:       item.Content,
+			Content:       content,
 			Priority:      priorityValue,
 			BatchID:       pgtype.UUID{Bytes: batchID, Valid: true},
 			CorrelationID: pgtype.Text{String: obs.CorrelationID(ctx), Valid: true},
@@ -534,15 +543,19 @@ func timestamptz(t *time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: *t, Valid: true}
 }
 
-func validateRequest(body CreateNotificationRequest, priority Priority) (int16, error) {
+func validateRequest(body CreateNotificationRequest, priority Priority, templates map[uuid.UUID]string) (priorityValue int16, content string, err error) {
 	priorityValue, ok := priorities[priority]
 	if !ok {
-		return 0, errors.New("priority must be one of high, normal, low")
+		return 0, "", errors.New("priority must be one of high, normal, low")
 	}
-	if err := validate.Notification(string(body.Channel), body.Recipient, body.Content); err != nil {
-		return 0, err
+	content, err = contentOf(body, templates)
+	if err != nil {
+		return 0, "", err
 	}
-	return priorityValue, nil
+	if err := validate.Notification(string(body.Channel), body.Recipient, content); err != nil {
+		return 0, "", err
+	}
+	return priorityValue, content, nil
 }
 
 func firstIDAt(t time.Time) uuid.UUID {
@@ -633,6 +646,9 @@ func requestError(err error) (int, string) {
 	var badTime *time.ParseError
 	if errors.As(err, &badTime) {
 		return http.StatusBadRequest, "scheduled_at must be a date and time in RFC 3339, for example 2026-01-02T15:04:05Z"
+	}
+	if strings.Contains(err.Error(), "invalid UUID") || strings.Contains(err.Error(), "invalid urn prefix") {
+		return http.StatusBadRequest, "template_id must be a UUID"
 	}
 	return http.StatusBadRequest, "request body must be a valid JSON object"
 }

@@ -131,13 +131,27 @@ type CreateBatchRequest struct {
 
 // CreateNotificationRequest defines model for CreateNotificationRequest.
 type CreateNotificationRequest struct {
-	Channel   Channel   `json:"channel"`
-	Content   string    `json:"content"`
+	Channel Channel `json:"channel"`
+
+	// Content The text to send. Required unless template_id is sent. Send content or template_id, not both.
+	Content   string    `json:"content,omitempty"`
 	Priority  *Priority `json:"priority,omitempty"`
 	Recipient string    `json:"recipient"`
 
 	// ScheduledAt Do not send before this time, an RFC 3339 date and time. Without it, or with a time in the past, the notification is due at once. Until its time the notification is pending and can be cancelled. The response does not include it.
 	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
+
+	// TemplateId The template to render into the content. The rendered text is stored on the notification and checked like content.
+	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
+
+	// Variables The value of each placeholder of the template, by name. A placeholder without a value is rejected, and null is no value. A value without a placeholder is not used.
+	Variables map[string]*string `json:"variables,omitempty"`
+}
+
+// CreateTemplateRequest defines model for CreateTemplateRequest.
+type CreateTemplateRequest struct {
+	// Content The text of the template. A placeholder is a name in double braces, such as {{name}}. A name has ASCII letters, digits and underscores. Any other {{ or }} is rejected. The only size limit is the request body, but the rendered text must fit the channel it is sent on.
+	Content string `json:"content"`
 }
 
 // DeliveryAttempt defines model for DeliveryAttempt.
@@ -211,6 +225,13 @@ type Priority string
 // Status defines model for Status.
 type Status string
 
+// Template defines model for Template.
+type Template struct {
+	Content   string             `json:"content"`
+	CreatedAt time.Time          `json:"created_at"`
+	Id        openapi_types.UUID `json:"id"`
+}
+
 // CorrelationId defines model for CorrelationId.
 type CorrelationId = string
 
@@ -275,11 +296,20 @@ type CancelNotificationParams struct {
 	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
 }
 
+// CreateTemplateParams defines parameters for CreateTemplate.
+type CreateTemplateParams struct {
+	// XCorrelationID Names the request in the logs. It is 1 to 128 printable ASCII characters without spaces, sent once. Any other value is answered with 400. If it is not sent, or is not valid, the server generates one. Every response carries the id that was used, in the same header. It is stored with each notification the request creates and appears in the log lines of their delivery. A replay with an Idempotency-Key creates nothing, so the notification keeps the id of the first request.
+	XCorrelationID *CorrelationId `json:"X-Correlation-ID,omitempty"`
+}
+
 // CreateNotificationJSONRequestBody defines body for CreateNotification for application/json ContentType.
 type CreateNotificationJSONRequestBody = CreateNotificationRequest
 
 // CreateBatchJSONRequestBody defines body for CreateBatch for application/json ContentType.
 type CreateBatchJSONRequestBody = CreateBatchRequest
+
+// CreateTemplateJSONRequestBody defines body for CreateTemplate for application/json ContentType.
+type CreateTemplateJSONRequestBody = CreateTemplateRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -301,6 +331,9 @@ type ServerInterface interface {
 	// CancelNotification Cancel a pending notification
 	// (POST /v1/notifications/{id}/cancel)
 	CancelNotification(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params CancelNotificationParams)
+	// CreateTemplate Create a template
+	// (POST /v1/templates)
+	CreateTemplate(w http.ResponseWriter, r *http.Request, params CreateTemplateParams)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -714,6 +747,47 @@ func (siw *ServerInterfaceWrapper) CancelNotification(w http.ResponseWriter, r *
 	handler.ServeHTTP(w, r)
 }
 
+// CreateTemplate operation middleware
+func (siw *ServerInterfaceWrapper) CreateTemplate(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CreateTemplateParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Correlation-ID" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Correlation-ID")]; found {
+		var XCorrelationID CorrelationId
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Correlation-ID", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Correlation-ID", valueList[0], &XCorrelationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Correlation-ID", Err: err})
+			return
+		}
+
+		params.XCorrelationID = &XCorrelationID
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateTemplate(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -839,6 +913,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/notifications/batch", wrapper.CreateBatch)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/notifications/{id}", wrapper.GetNotification)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/notifications/{id}/cancel", wrapper.CancelNotification)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/templates", wrapper.CreateTemplate)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/batches/{id}", wrapper.GetBatch)
 
 	return m
@@ -1289,6 +1364,85 @@ func (response CancelNotification500JSONResponse) VisitCancelNotificationRespons
 	return err
 }
 
+type CreateTemplateRequestObject struct {
+	Params CreateTemplateParams
+	Body   *CreateTemplateJSONRequestBody
+}
+
+type CreateTemplateResponseObject interface {
+	VisitCreateTemplateResponse(w http.ResponseWriter) error
+}
+
+type CreateTemplate201JSONResponse Template
+
+func (response CreateTemplate201JSONResponse) VisitCreateTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTemplate400JSONResponse Error
+
+func (response CreateTemplate400JSONResponse) VisitCreateTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTemplate413JSONResponse Error
+
+func (response CreateTemplate413JSONResponse) VisitCreateTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(413)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTemplate422JSONResponse Error
+
+func (response CreateTemplate422JSONResponse) VisitCreateTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTemplate500JSONResponse Error
+
+func (response CreateTemplate500JSONResponse) VisitCreateTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// GetBatch Get the status counts of a batch
@@ -1309,6 +1463,9 @@ type StrictServerInterface interface {
 	// CancelNotification Cancel a pending notification
 	// (POST /v1/notifications/{id}/cancel)
 	CancelNotification(ctx context.Context, request CancelNotificationRequestObject) (CancelNotificationResponseObject, error)
+	// CreateTemplate Create a template
+	// (POST /v1/templates)
+	CreateTemplate(ctx context.Context, request CreateTemplateRequestObject) (CreateTemplateResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -1516,6 +1673,39 @@ func (sh *strictHandler) CancelNotification(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(CancelNotificationResponseObject); ok {
 		if err := validResponse.VisitCancelNotificationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateTemplate operation middleware
+func (sh *strictHandler) CreateTemplate(w http.ResponseWriter, r *http.Request, params CreateTemplateParams) {
+	var request CreateTemplateRequestObject
+
+	request.Params = params
+
+	var body CreateTemplateJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateTemplate(ctx, request.(CreateTemplateRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateTemplate")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateTemplateResponseObject); ok {
+		if err := validResponse.VisitCreateTemplateResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

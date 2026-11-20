@@ -162,3 +162,12 @@ SELECT
 FROM notifications
 WHERE status = 'pending'
 GROUP BY channel, priority;
+
+-- name: InsertTemplate :one
+INSERT INTO templates (id, content)
+VALUES ($1, $2)
+RETURNING *;
+
+-- name: GetTemplates :many
+SELECT id, content FROM templates
+WHERE id = ANY (sqlc.arg('ids')::uuid[]);

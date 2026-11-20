@@ -127,6 +127,40 @@ These are settled. Raise it before changing one.
   `notifications_pending` and can be cancelled. The cost:
   `notification_delivery_duration_seconds` includes the scheduled wait,
   so a scheduled notification looks slow.
+- Templates: `POST /v1/templates` stores a text with placeholders and
+  answers 201 with its id. A template belongs to no channel. A
+  placeholder is `{{name}}`: ASCII letters, digits and underscores, no
+  spaces. Content that is empty, has a NUL character, or has `{{` or `}}`
+  outside a placeholder is 422. Reason: `{{ name }}` would otherwise
+  reach the recipient as it is written. The cost: a template cannot hold
+  a literal `{{`. These checks are in `internal/api`, next to the
+  rendering. Reason: both use one placeholder pattern. A template has no
+  size limit of its own, so the body limit of 1 MB applies. No endpoint
+  reads, lists, changes or deletes a template, and the create endpoint
+  takes no `Idempotency-Key`. Reason for no change: the idempotency hash
+  of a notification covers `template_id`, not the text, so a changed
+  template would let one key stand for two texts.
+- Creating from a template: a create request, or an item of a batch,
+  names a template with `template_id` and gives `variables`, an object
+  of strings, in place of `content`. Rejected with 422, or as that
+  item's error in a batch: `content` that is not empty next to
+  `template_id`; `variables` that are not empty without `template_id`; a
+  template that does not exist; a placeholder without a variable, where
+  the message lists the missing names. A variable that is null counts as
+  missing. Reason: it was rendered as an empty text. A variable without a
+  placeholder is not used. Reason: one set of variables can serve several
+  templates. A `template_id` that is not a UUID is 400 and rejects a
+  whole batch, like a field of the wrong type. The API renders at create
+  time, in one pass, so a value that holds a placeholder is not rendered
+  again. Rendering stops with a 422 once the text passes 100 kB, the
+  largest content any channel allows. Reason: a 1 MB template of one
+  placeholder repeated, with a large value, made the API build
+  gigabytes. The rendered text is validated like `content` and is what
+  the row stores. The row does not keep the template id. The idempotency
+  hash covers `template_id` and `variables`, not the rendered text, so
+  the same text sent as `content` is a different request. A request
+  reads its templates with one query, a batch too, before anything is
+  stored.
 - Validation runs at the API, in `internal/validate`, as a map from channel
   to function. Limits are named constants:
   - sms: recipient in E.164; content 1 to 1600 characters.
@@ -150,7 +184,8 @@ These are settled. Raise it before changing one.
   its id, a rejected one with the reason. Rejected items are not stored. A
   batch is the set of rows that share a `batch_id`: there is no batches
   table, and its status is the count of those rows by status.
-- Idempotency: optional `Idempotency-Key` header on both create endpoints.
+- Idempotency: optional `Idempotency-Key` header on the two endpoints
+  that create notifications.
   Table `idempotency_keys (key primary key, request_hash, response,
   created_at)`. Insert the key in the same transaction as the notifications
   with `ON CONFLICT DO NOTHING`. On conflict return the stored response. The
@@ -482,6 +517,7 @@ GET  /v1/notifications/{id}
 GET  /v1/notifications
 POST /v1/notifications/{id}/cancel
 GET  /v1/batches/{id}
+POST /v1/templates
 GET  /healthz   GET /readyz   GET /metrics   GET /openapi.yaml
 ```
 

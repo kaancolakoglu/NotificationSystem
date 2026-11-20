@@ -105,10 +105,11 @@ paths:
         "400":
           description: >-
             The request body is not a valid JSON object, has a field that
-            is not known or is of the wrong type, or the Idempotency-Key is
-            sent more than once or is not 1 to 255 bytes long. A query
-            parameter and an X-Correlation-ID that is not valid are rejected
-            too.
+            is not known or is of the wrong type, such as a scheduled_at
+            that is not a date and time or a template_id that is not a UUID,
+            or the Idempotency-Key is sent more than once or is not 1 to 255
+            bytes long. A query parameter and an X-Correlation-ID that is
+            not valid are rejected too.
           content:
             application/json:
               schema:
@@ -126,7 +127,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "422":
-          description: The notification failed validation.
+          description: >-
+            The notification failed validation, or its template is not
+            known, is sent next to content, lacks a variable, or renders to
+            more than 100 kB.
           content:
             application/json:
               schema:
@@ -165,9 +169,11 @@ paths:
         "400":
           description: >-
             The request body is not a valid JSON object, has a field that
-            is not known or is of the wrong type, or the Idempotency-Key is
-            sent more than once or is not 1 to 255 bytes long. Such a field
-            in one notification rejects the whole batch. A query parameter
+            is not known or is of the wrong type, such as a scheduled_at
+            that is not a date and time or a template_id that is not a UUID,
+            or the Idempotency-Key is sent more than once or is not 1 to 255
+            bytes long. Such a field in one notification rejects the whole
+            batch. A query parameter
             and an X-Correlation-ID that is not valid are rejected too.
             Nothing was created.
           content:
@@ -292,6 +298,59 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/templates:
+    parameters:
+      - $ref: "#/components/parameters/CorrelationId"
+    post:
+      operationId: createTemplate
+      summary: Create a template
+      description: >-
+        A template is text with placeholders, for any channel. A create
+        request for a notification names it with template_id and gives the
+        values with variables. A template cannot be read, listed, changed
+        or deleted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTemplateRequest"
+      responses:
+        "201":
+          description: The template was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Template"
+        "400":
+          description: >-
+            The request body is not a valid JSON object, or has a field that
+            is not known or is of the wrong type. A query parameter and an
+            X-Correlation-ID that is not valid are rejected too.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: The request body is larger than 1 MB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: >-
+            The content is empty, has a NUL character, or has double braces
+            that are not a placeholder.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: The server failed to store the template.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/batches/{id}:
     parameters:
       - $ref: "#/components/parameters/CorrelationId"
@@ -376,7 +435,7 @@ components:
     CreateNotificationRequest:
       type: object
       additionalProperties: false
-      required: [recipient, channel, content]
+      required: [recipient, channel]
       properties:
         recipient:
           type: string
@@ -384,6 +443,26 @@ components:
           $ref: "#/components/schemas/Channel"
         content:
           type: string
+          x-go-type-skip-optional-pointer: true
+          description: >-
+            The text to send. Required unless template_id is sent. Send
+            content or template_id, not both.
+        template_id:
+          type: string
+          format: uuid
+          description: >-
+            The template to render into the content. The rendered text is
+            stored on the notification and checked like content.
+        variables:
+          type: object
+          additionalProperties:
+            type: string
+            nullable: true
+          x-go-type-skip-optional-pointer: true
+          description: >-
+            The value of each placeholder of the template, by name. A
+            placeholder without a value is rejected, and null is no value.
+            A value without a placeholder is not used.
         priority:
           allOf:
             - $ref: "#/components/schemas/Priority"
@@ -396,6 +475,31 @@ components:
             it, or with a time in the past, the notification is due at once.
             Until its time the notification is pending and can be cancelled.
             The response does not include it.
+    CreateTemplateRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: >-
+            The text of the template. A placeholder is a name in double
+            braces, such as {{name}}. A name has ASCII letters, digits and
+            underscores. Any other {{ or }} is rejected. The only size
+            limit is the request body, but the rendered text must fit the
+            channel it is sent on.
+    Template:
+      type: object
+      required: [id, content, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
     Notification:
       type: object
       required: [id, recipient, channel, content, priority, status, created_at, attempts]

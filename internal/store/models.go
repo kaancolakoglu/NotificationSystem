@@ -42,3 +42,9 @@ type Notification struct {
 	LockedUntil       pgtype.Timestamptz
 	CorrelationID     pgtype.Text
 }
+
+type Template struct {
+	ID        uuid.UUID
+	Content   string
+	CreatedAt time.Time
+}
