@@ -68,3 +68,67 @@ func TestSimultaneousUpAppliesEachMigrationOnce(t *testing.T) {
 		t.Errorf("version table holds %d rows for %d versions, want %d of each", applied, distinct, want)
 	}
 }
+
+func TestLeaseMigrationGivesProcessingRowsALease(t *testing.T) {
+	const leaseVersion = 6
+	pool := testdb.New(t)
+	ctx := t.Context()
+
+	db := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.Files)
+	if err != nil {
+		t.Fatalf("create migration provider: %v", err)
+	}
+	if _, err := provider.DownTo(ctx, leaseVersion-1); err != nil {
+		t.Fatalf("roll back to before the lease: %v", err)
+	}
+	const insert = "INSERT INTO notifications (id, recipient, channel, content, priority, status) VALUES (gen_random_uuid(), '+905551234567', 'sms', 'hello', 1, $1)"
+	for _, status := range []string{"processing", "pending", "sent"} {
+		if _, err := pool.Exec(ctx, insert, status); err != nil {
+			t.Fatalf("insert %s notification: %v", status, err)
+		}
+	}
+
+	if _, err := provider.UpTo(ctx, leaseVersion); err != nil {
+		t.Fatalf("apply the lease migration: %v", err)
+	}
+
+	rows, err := pool.Query(ctx, "SELECT status, extract(epoch FROM locked_until - now())::float8 FROM notifications")
+	if err != nil {
+		t.Fatalf("read leases: %v", err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var status string
+		var seconds *float64
+		if err := rows.Scan(&status, &seconds); err != nil {
+			t.Fatalf("scan lease: %v", err)
+		}
+		seen++
+		if status != "processing" {
+			if seconds != nil {
+				t.Errorf("%s notification has a lease of %f s, want none", status, *seconds)
+			}
+			continue
+		}
+		if seconds == nil {
+			t.Error("processing notification has no lease, want one of just under 60 s")
+			continue
+		}
+		if *seconds < 50 || *seconds > 60 {
+			t.Errorf("processing notification has a lease of %f s, want just under 60", *seconds)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read leases: %v", err)
+	}
+	if seen != 3 {
+		t.Errorf("read %d notifications, want 3", seen)
+	}
+}

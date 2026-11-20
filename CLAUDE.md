@@ -172,12 +172,13 @@ These are settled. Raise it before changing one.
   the row's value after the failed send, so 1 after the first try. Maximum
   5 attempts, so the ceilings are 2, 4, 8 and 16 s.
 - A claim increments `attempts`, so an attempt in progress is counted.
-  Every provider call whose result is stored is one row in
-  `delivery_attempts (notification_id, attempt, error, created_at)`, written
-  in the same statement as the result, so the two cannot disagree. A result
-  that could not be stored leaves no row and is only logged. `error` is
-  null for the accepted attempt. `last_error` on the notification is the
-  error of the last failed attempt, and stays after a later success.
+  Every finished attempt is one row in
+  `delivery_attempts (notification_id, attempt, error, created_at)`. A
+  stored result writes its row in the same statement, so the two cannot
+  disagree. An attempt whose result was not stored gets its row from the
+  sweeper, and the result itself is only logged. `error` is null for the
+  accepted attempt. `last_error` on the notification is the error of the
+  last failed or lost attempt, and stays after a later success.
 - Every notification the API returns has `attempts` and `last_error`.
   `GET /v1/notifications/{id}` also lists the delivery attempts.
 - Rate limit per channel: rate 90 per second, burst 5, so we release at
@@ -194,19 +195,33 @@ These are settled. Raise it before changing one.
   Reason: with a database that stopped answering, a pool froze and logged
   nothing. A call that times out is logged, a result write with the provider
   message id. The statement may still finish on the server, so a claim that
-  timed out can leave rows `processing` that no sender holds.
+  timed out can leave rows `processing` that no sender holds. A result
+  write that failed leaves its row `processing` too. The sweeper takes both
+  once the lease has expired, and the lost attempt counts.
 - The provider client keeps one idle connection per sender, 60 in total.
   Reason: Go keeps 2 per host, and each poll starts up to 20 sends at once
   per channel. Measured with 2: 1443 connections for 1500 sends.
 - Lease: a claim sets `locked_until = now() + 60s` and increments `attempts`.
   Result writes are conditional on `id`, `status = 'processing'` and the
-  `attempts` value read at claim.
+  `attempts` value read at claim. Reason: a sender that stalled past its
+  lease must not overwrite the attempt that took the row after it. Its
+  result is logged and dropped. The provider may then get the notification
+  twice, with the same `Idempotency-Key`.
 - Release: a row given up without a provider call goes back to `pending`
   with its attempt refunded. This covers a breaker refusal, an unreachable
   limiter and a shutdown before the send starts. The write is conditional
   like a result write.
 - Sweeper: every 15 s, `processing` rows with an expired lease go back to
-  `pending`, or to `failed` if attempts are used up.
+  `pending`, or to `failed` if attempts are used up. A row sent back is due
+  at once. The lost attempt gets a `delivery_attempts` row with the error
+  `lease expired before a result was stored`, which is also the row's
+  `last_error`. A lost attempt may never have called the provider, or the
+  provider may have accepted it. So a row the sweeper fails may have been
+  delivered. Every worker runs a sweeper; two sweeping at once are safe,
+  because the sweep is one statement and its UPDATE is conditional. Backed
+  by a partial index on
+  `(locked_until) WHERE status = 'processing'`. Reason: the sweep must not
+  scan the whole table every 15 s, and few rows are `processing` at a time.
 - Breaker: one per channel. Opens after 5 consecutive failures for 30 s; 3
   trial calls when half-open. Only transport errors, timeouts and 5xx count.
   While open, the poll loop does not claim for that channel. A row the
@@ -244,7 +259,7 @@ migrations/
 | State | Meaning | Leaves when |
 | --- | --- | --- |
 | pending | waiting for its time | a worker claims it, or the client cancels |
-| processing | a worker holds a lease | result is written, or the lease expires |
+| processing | claimed, with a lease | result is written, or the sweeper finds the lease expired |
 | sent | provider answered 202 | never |
 | failed | permanent error or attempts used up | never |
 | cancelled | cancelled before a claim | never |

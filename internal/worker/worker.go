@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/kaancolakoglu/NotificationSystem/internal/provider"
@@ -94,38 +93,40 @@ func (p Pool) send(ctx context.Context, notification store.Notification) {
 	if sendErr == nil {
 		changed, err := p.Queries.MarkSent(queryCtx, store.MarkSentParams{
 			ID:                notification.ID,
+			Attempts:          notification.Attempts,
 			ProviderMessageID: pgtype.Text{String: messageID, Valid: messageID != ""},
 		})
-		p.checkWrite(ctx, notification.ID, "sent", messageID, changed, err)
+		p.checkWrite(ctx, notification, "sent", messageID, changed, err)
 		return
 	}
 
 	p.Logger.ErrorContext(ctx, "send notification", "notification_id", notification.ID, "attempt", notification.Attempts, "error", sendErr)
 	var failure *provider.Error
 	if !errors.As(sendErr, &failure) || !failure.Retryable || notification.Attempts >= maxAttempts {
-		changed, err := p.Queries.MarkFailed(queryCtx, store.MarkFailedParams{ID: notification.ID, Error: sendErr.Error()})
-		p.checkWrite(ctx, notification.ID, "failed", "", changed, err)
+		changed, err := p.Queries.MarkFailed(queryCtx, store.MarkFailedParams{ID: notification.ID, Attempts: notification.Attempts, Error: sendErr.Error()})
+		p.checkWrite(ctx, notification, "failed", "", changed, err)
 		return
 	}
 	delay := retryDelay(p.BackoffBase, notification.Attempts, failure.RetryAfter)
 	changed, err := p.Queries.ScheduleRetry(queryCtx, store.ScheduleRetryParams{
-		ID:    notification.ID,
-		Error: sendErr.Error(),
-		Delay: pgtype.Interval{Microseconds: delay.Microseconds(), Valid: true},
+		ID:       notification.ID,
+		Attempts: notification.Attempts,
+		Error:    sendErr.Error(),
+		Delay:    pgtype.Interval{Microseconds: delay.Microseconds(), Valid: true},
 	})
-	p.checkWrite(ctx, notification.ID, "pending", "", changed, err)
+	p.checkWrite(ctx, notification, "pending", "", changed, err)
 }
 
 func retryDelay(base time.Duration, attempts int16, retryAfter time.Duration) time.Duration {
 	return max(rand.N(base<<attempts), retryAfter)
 }
 
-func (p Pool) checkWrite(ctx context.Context, id uuid.UUID, status, messageID string, changed int64, err error) {
+func (p Pool) checkWrite(ctx context.Context, notification store.Notification, status, messageID string, changed int64, err error) {
 	if err != nil {
-		p.Logger.ErrorContext(ctx, "write result", "notification_id", id, "status", status, "provider_message_id", messageID, "error", err)
+		p.Logger.ErrorContext(ctx, "write result", "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID, "error", err)
 		return
 	}
 	if changed == 0 {
-		p.Logger.ErrorContext(ctx, "result not written, notification is no longer processing", "notification_id", id, "status", status, "provider_message_id", messageID)
+		p.Logger.ErrorContext(ctx, "result not written, this attempt no longer holds the notification", "notification_id", notification.ID, "attempt", notification.Attempts, "status", status, "provider_message_id", messageID)
 	}
 }

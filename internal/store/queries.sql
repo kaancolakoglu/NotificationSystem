@@ -69,7 +69,8 @@ WITH due AS (
 )
 UPDATE notifications
 SET status = 'processing',
-    attempts = notifications.attempts + 1
+    attempts = notifications.attempts + 1,
+    locked_until = now() + interval '60 seconds'
 FROM due
 WHERE notifications.id = due.id
 RETURNING notifications.*;
@@ -80,7 +81,7 @@ WITH written AS (
     SET status = 'sent',
         sent_at = now(),
         provider_message_id = sqlc.narg('provider_message_id')
-    WHERE id = sqlc.arg('id') AND status = 'processing'
+    WHERE id = sqlc.arg('id') AND status = 'processing' AND attempts = sqlc.arg('attempts')
     RETURNING id, attempts
 )
 INSERT INTO delivery_attempts (notification_id, attempt)
@@ -91,7 +92,7 @@ WITH written AS (
     UPDATE notifications
     SET status = 'failed',
         last_error = sqlc.arg('error')::text
-    WHERE id = sqlc.arg('id') AND status = 'processing'
+    WHERE id = sqlc.arg('id') AND status = 'processing' AND attempts = sqlc.arg('attempts')
     RETURNING id, attempts, last_error
 )
 INSERT INTO delivery_attempts (notification_id, attempt, error)
@@ -103,11 +104,24 @@ WITH written AS (
     SET status = 'pending',
         next_attempt_at = now() + sqlc.arg('delay')::interval,
         last_error = sqlc.arg('error')::text
-    WHERE id = sqlc.arg('id') AND status = 'processing'
+    WHERE id = sqlc.arg('id') AND status = 'processing' AND attempts = sqlc.arg('attempts')
     RETURNING id, attempts, last_error
 )
 INSERT INTO delivery_attempts (notification_id, attempt, error)
 SELECT id, attempts, last_error FROM written;
+
+-- name: SweepExpiredLeases :many
+WITH swept AS (
+    UPDATE notifications
+    SET status = CASE WHEN attempts >= sqlc.arg('max_attempts')::smallint THEN 'failed' ELSE 'pending' END,
+        last_error = sqlc.arg('error')::text
+    WHERE status = 'processing' AND locked_until < now()
+    RETURNING id, status, attempts, last_error
+), recorded AS (
+    INSERT INTO delivery_attempts (notification_id, attempt, error)
+    SELECT id, attempts, last_error FROM swept
+)
+SELECT id, status, attempts FROM swept;
 
 -- name: ListDeliveryAttempts :many
 SELECT attempt, error, created_at FROM delivery_attempts

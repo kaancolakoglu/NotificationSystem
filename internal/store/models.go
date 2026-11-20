@@ -39,4 +39,5 @@ type Notification struct {
 	ProviderMessageID pgtype.Text
 	Attempts          int16
 	LastError         pgtype.Text
+	LockedUntil       pgtype.Timestamptz
 }

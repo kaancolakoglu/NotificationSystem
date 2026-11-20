@@ -142,10 +142,10 @@ type DeliveryAttempt struct {
 	// Attempt Number of the attempt, from 1.
 	Attempt int `json:"attempt"`
 
-	// CreatedAt When the result of the attempt was stored.
+	// CreatedAt When the result of the attempt was stored, or when the attempt was found lost.
 	CreatedAt time.Time `json:"created_at"`
 
-	// Error Present when the attempt failed.
+	// Error Present when the attempt failed or was lost. `lease expired before a result was stored` means the worker lost the attempt: the provider may never have been called, or may have accepted it.
 	Error *string `json:"error,omitempty"`
 }
 
@@ -166,7 +166,7 @@ type Notification struct {
 	CreatedAt time.Time           `json:"created_at"`
 	Id        openapi_types.UUID  `json:"id"`
 
-	// LastError Why the last failed attempt failed. It stays after a later attempt succeeds.
+	// LastError The error of the last failed or lost attempt. It stays after a later attempt succeeds.
 	LastError *string  `json:"last_error,omitempty"`
 	Priority  Priority `json:"priority"`
 	Recipient string   `json:"recipient"`
@@ -184,11 +184,11 @@ type NotificationDetail struct {
 	Content   string              `json:"content"`
 	CreatedAt time.Time           `json:"created_at"`
 
-	// DeliveryAttempts Oldest first. An attempt appears once its result is stored.
+	// DeliveryAttempts Oldest first. An attempt appears once its result is stored, or once it is found lost.
 	DeliveryAttempts []DeliveryAttempt  `json:"delivery_attempts"`
 	Id               openapi_types.UUID `json:"id"`
 
-	// LastError Why the last failed attempt failed. It stays after a later attempt succeeds.
+	// LastError The error of the last failed or lost attempt. It stays after a later attempt succeeds.
 	LastError *string  `json:"last_error,omitempty"`
 	Priority  Priority `json:"priority"`
 	Recipient string   `json:"recipient"`

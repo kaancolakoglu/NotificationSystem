@@ -22,6 +22,7 @@ const (
 	pollInterval    = 200 * time.Millisecond
 	databaseTimeout = 5 * time.Second
 	backoffBase     = time.Second
+	sweepInterval   = 15 * time.Second
 )
 
 var channels = []string{"sms", "email", "push"}
@@ -57,9 +58,9 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL stri
 
 	queries := store.New(pool)
 	client := provider.New(providerURL, len(channels)*poolSize, logger)
-	var pools sync.WaitGroup
+	var loops sync.WaitGroup
 	for _, channel := range channels {
-		pools.Go(func() {
+		loops.Go(func() {
 			worker.Pool{
 				Queries:      queries,
 				Provider:     client,
@@ -72,7 +73,15 @@ func run(ctx context.Context, logger *slog.Logger, databaseURL, providerURL stri
 			}.Run(ctx)
 		})
 	}
-	pools.Wait()
+	loops.Go(func() {
+		worker.Sweeper{
+			Queries:      queries,
+			Logger:       logger,
+			Interval:     sweepInterval,
+			QueryTimeout: timeout,
+		}.Run(ctx)
+	})
+	loops.Wait()
 	return ctx.Err()
 }
 

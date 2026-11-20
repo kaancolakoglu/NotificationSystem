@@ -549,11 +549,11 @@ func TestGetNotification(t *testing.T) {
 			}
 		}
 		claim()
-		if changed, err := queries.ScheduleRetry(t.Context(), store.ScheduleRetryParams{ID: retried.ID, Error: failure, Delay: pgtype.Interval{Valid: true}}); err != nil || changed != 1 {
+		if changed, err := queries.ScheduleRetry(t.Context(), store.ScheduleRetryParams{ID: retried.ID, Attempts: 1, Error: failure, Delay: pgtype.Interval{Valid: true}}); err != nil || changed != 1 {
 			t.Fatalf("schedule retry: changed %d rows, error %v", changed, err)
 		}
 		claim()
-		if changed, err := queries.MarkSent(t.Context(), store.MarkSentParams{ID: retried.ID, ProviderMessageID: pgtype.Text{String: "message-1", Valid: true}}); err != nil || changed != 1 {
+		if changed, err := queries.MarkSent(t.Context(), store.MarkSentParams{ID: retried.ID, Attempts: 2, ProviderMessageID: pgtype.Text{String: "message-1", Valid: true}}); err != nil || changed != 1 {
 			t.Fatalf("mark sent: changed %d rows, error %v", changed, err)
 		}
 

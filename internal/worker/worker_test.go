@@ -150,6 +150,23 @@ func attempts(t *testing.T, queries *store.Queries, id uuid.UUID) []store.ListDe
 	return rows
 }
 
+func hold(t *testing.T, db *pgxpool.Pool, id uuid.UUID, attempts int16, lease string) {
+	t.Helper()
+	if _, err := db.Exec(t.Context(), "UPDATE notifications SET status = 'processing', attempts = $2, locked_until = now() + $3::interval WHERE id = $1", id, attempts, lease); err != nil {
+		t.Fatalf("set the notification processing: %v", err)
+	}
+}
+
+func runSweeper(t *testing.T, sweeper Sweeper) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sweeper.Run(t.Context())
+	}()
+	t.Cleanup(func() { <-done })
+}
+
 func runPool(t *testing.T, pool Pool) {
 	t.Helper()
 	done := make(chan struct{})
@@ -579,7 +596,7 @@ func TestResultForARowThatIsNotProcessingIsLogged(t *testing.T) {
 	if status := get(t, queries, pending.ID).Status; status != "pending" {
 		t.Errorf("status = %q, want %q", status, "pending")
 	}
-	for _, want := range []string{`"level":"ERROR"`, `"msg":"result not written, notification is no longer processing"`, `"notification_id":"` + pending.ID.String() + `"`, `"status":"sent"`, `"provider_message_id":"message-1"`} {
+	for _, want := range []string{`"level":"ERROR"`, `"msg":"result not written, this attempt no longer holds the notification"`, `"notification_id":"` + pending.ID.String() + `"`, `"attempt":0`, `"status":"sent"`, `"provider_message_id":"message-1"`} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("logs = %s, want them to contain %s", logs.String(), want)
 		}
@@ -645,7 +662,7 @@ func TestResultWriteGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 				t.Fatal("timed out waiting for the provider request")
 			}
 			waitFor(t, "the result write gives up", func() bool {
-				return logs.lineWith(`"msg":"write result"`, `"notification_id":"`+created.ID.String()+`"`, `"status":"`+tt.wantStatus+`"`, `"provider_message_id":"`+tt.wantMessageID+`"`, "context deadline exceeded")
+				return logs.lineWith(`"msg":"write result"`, `"notification_id":"`+created.ID.String()+`"`, `"attempt":1`, `"status":"`+tt.wantStatus+`"`, `"provider_message_id":"`+tt.wantMessageID+`"`, "context deadline exceeded")
 			})
 
 			if keys := fake.keys(); len(keys) != 1 {
@@ -653,4 +670,148 @@ func TestResultWriteGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExpiredLeaseIsSentAgain(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	fake, client := newProvider(t, accept)
+	lost := insert(t, queries, "sms", 1)
+	hold(t, db, lost.ID, 1, "-1 second")
+	held := insert(t, queries, "sms", 1)
+	hold(t, db, held.ID, 1, "1 minute")
+	due := insert(t, queries, "sms", 1)
+	var logs syncBuffer
+
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	waitFor(t, "the pending notification is sent", func() bool { return get(t, queries, due.ID).Status == "sent" })
+	if keys, want := fake.keys(), []string{due.ID.String()}; !slices.Equal(keys, want) {
+		t.Fatalf("provider got requests for %v before the sweeper ran, want only %v", keys, want)
+	}
+	runSweeper(t, Sweeper{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout})
+	waitFor(t, "the notification with the expired lease is sent", func() bool { return get(t, queries, lost.ID).Status == "sent" })
+	time.Sleep(10 * pollInterval)
+
+	if keys, want := fake.keys(), []string{due.ID.String(), lost.ID.String()}; !slices.Equal(keys, want) {
+		t.Errorf("provider got requests for %v, want %v", keys, want)
+	}
+	if stored, want := get(t, queries, lost.ID), "lease expired before a result was stored"; stored.Attempts != 2 || stored.LastError.String != want {
+		t.Errorf("attempts = %d, last error = %+v, want 2 and %q", stored.Attempts, stored.LastError, want)
+	}
+	history := attempts(t, queries, lost.ID)
+	if len(history) != 2 || history[0].Attempt != 1 || history[0].Error.String != leaseExpired || history[1].Attempt != 2 || history[1].Error.Valid {
+		t.Errorf("delivery attempts = %+v, want number 1 with the error %q, then number 2 with none", history, leaseExpired)
+	}
+	if !logs.lineWith(`"level":"WARN"`, `"msg":"lease expired"`, `"notification_id":"`+lost.ID.String()+`"`, `"attempt":1`, `"status":"pending"`) {
+		t.Error("logs have no lease expired line for the notification")
+	}
+	if stored := get(t, queries, held.ID); stored.Status != "processing" || stored.Attempts != 1 {
+		t.Errorf("notification with a lease still running: status = %q, attempts = %d, want processing and 1", stored.Status, stored.Attempts)
+	}
+}
+
+func TestExpiredLeaseWithAttemptsUsedUpFails(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	fake, client := newProvider(t, accept)
+	lost := insert(t, queries, "sms", 1)
+	hold(t, db, lost.ID, maxAttempts, "-1 second")
+	var logs syncBuffer
+
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	runSweeper(t, Sweeper{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: queryTimeout})
+	waitFor(t, "the notification is failed", func() bool { return get(t, queries, lost.ID).Status == "failed" })
+	time.Sleep(10 * pollInterval)
+
+	if keys := fake.keys(); len(keys) != 0 {
+		t.Errorf("provider got requests for %v, want none", keys)
+	}
+	if stored := get(t, queries, lost.ID); stored.Status != "failed" || stored.Attempts != maxAttempts || stored.LastError.String != leaseExpired {
+		t.Errorf("status = %q, attempts = %d, last error = %+v, want failed, %d and %q", stored.Status, stored.Attempts, stored.LastError, maxAttempts, leaseExpired)
+	}
+	if history := attempts(t, queries, lost.ID); len(history) != 1 || history[0].Attempt != maxAttempts || history[0].Error.String != leaseExpired {
+		t.Errorf("delivery attempts = %+v, want one, number %d with the error %q", history, maxAttempts, leaseExpired)
+	}
+	if !logs.lineWith(`"level":"ERROR"`, `"msg":"lease expired"`, `"notification_id":"`+lost.ID.String()+`"`, `"attempt":5`, `"status":"failed"`) {
+		t.Error("logs have no lease expired line for the notification")
+	}
+}
+
+func TestStaleResultWriteChangesNothing(t *testing.T) {
+	tests := []struct {
+		name       string
+		answer     func(w http.ResponseWriter) error
+		wantStatus string
+	}{
+		{name: "sent", answer: accept, wantStatus: "sent"},
+		{name: "failed", answer: status(http.StatusBadRequest), wantStatus: "failed"},
+		{name: "retry", answer: status(http.StatusInternalServerError), wantStatus: "pending"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := testdb.New(t)
+			queries := store.New(db)
+			_, client := newProvider(t, tt.answer)
+			var logs bytes.Buffer
+			pool := Pool{Queries: queries, Provider: client, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Channel: "sms", Size: 1, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase}
+			created := insert(t, queries, "sms", 1)
+			claim := func() store.Notification {
+				t.Helper()
+				claimed, err := queries.ClaimNotifications(t.Context(), store.ClaimNotificationsParams{Channel: "sms", Priority: 1, RowLimit: 1})
+				if err != nil || len(claimed) != 1 || claimed[0].ID != created.ID {
+					t.Fatalf("claim = %+v, error %v, want the notification", claimed, err)
+				}
+				return claimed[0]
+			}
+			stale := claim()
+			hold(t, db, created.ID, stale.Attempts, "-1 second")
+			Sweeper{Queries: queries, Logger: slog.New(slog.DiscardHandler), QueryTimeout: queryTimeout}.sweep(t.Context())
+			current := claim()
+			if stale.Attempts != 1 || current.Attempts != 2 {
+				t.Fatalf("attempts of the two claims = %d and %d, want 1 and 2", stale.Attempts, current.Attempts)
+			}
+
+			pool.send(t.Context(), stale)
+
+			if stored := get(t, queries, created.ID); stored != current {
+				t.Errorf("row after the stale result = %+v, want it unchanged %+v", stored, current)
+			}
+			if history := attempts(t, queries, created.ID); len(history) != 1 || history[0].Error.String != leaseExpired {
+				t.Errorf("delivery attempts = %+v, want only the expired one", history)
+			}
+			for _, want := range []string{`"msg":"result not written, this attempt no longer holds the notification"`, `"notification_id":"` + created.ID.String() + `"`, `"attempt":1`, `"status":"` + tt.wantStatus + `"`} {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("logs = %s, want them to contain %s", logs.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestSweepGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
+	db := testdb.New(t)
+	queries := store.New(db)
+	_, client := newProvider(t, accept)
+	lost := insert(t, queries, "sms", 1)
+	hold(t, db, lost.ID, 1, "-1 second")
+	var logs syncBuffer
+	lock, err := lockTable(t, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runSweeper(t, Sweeper{Queries: queries, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Interval: pollInterval, QueryTimeout: 50 * time.Millisecond})
+	waitFor(t, "the sweep gives up", func() bool {
+		return logs.lineWith(`"level":"ERROR"`, `"msg":"sweep expired leases"`, "context deadline exceeded")
+	})
+
+	if err := lock.Rollback(t.Context()); err != nil {
+		t.Fatalf("release table lock: %v", err)
+	}
+	later := insert(t, queries, "sms", 1)
+	hold(t, db, later.ID, 1, "-1 second")
+	runPool(t, Pool{Queries: queries, Provider: client, Logger: slog.New(slog.DiscardHandler), Channel: "sms", Size: 2, Interval: pollInterval, QueryTimeout: queryTimeout, BackoffBase: backoffBase})
+	waitFor(t, "a lease that expires after the database answers again is swept and sent", func() bool {
+		return get(t, queries, later.ID).Status == "sent"
+	})
 }

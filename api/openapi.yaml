@@ -234,8 +234,9 @@ paths:
       operationId: cancelNotification
       summary: Cancel a pending notification
       description: >-
-        Only a pending notification can be cancelled. A cancelled
-        notification is never sent. The request has no body.
+        Only a pending notification can be cancelled. No attempt to send
+        it starts after that. An earlier attempt whose result was lost may
+        have reached the provider. The request has no body.
       parameters:
         - name: id
           in: path
@@ -381,8 +382,8 @@ components:
         last_error:
           type: string
           description: >-
-            Why the last failed attempt failed. It stays after a later
-            attempt succeeds.
+            The error of the last failed or lost attempt. It stays after a
+            later attempt succeeds.
     DeliveryAttempt:
       type: object
       required: [attempt, created_at]
@@ -392,11 +393,17 @@ components:
           description: Number of the attempt, from 1.
         error:
           type: string
-          description: Present when the attempt failed.
+          description: >-
+            Present when the attempt failed or was lost. `lease expired
+            before a result was stored` means the worker lost the attempt:
+            the provider may never have been called, or may have accepted
+            it.
         created_at:
           type: string
           format: date-time
-          description: When the result of the attempt was stored.
+          description: >-
+            When the result of the attempt was stored, or when the attempt
+            was found lost.
     NotificationDetail:
       allOf:
         - $ref: "#/components/schemas/Notification"
@@ -405,7 +412,9 @@ components:
           properties:
             delivery_attempts:
               type: array
-              description: Oldest first. An attempt appears once its result is stored.
+              description: >-
+                Oldest first. An attempt appears once its result is stored,
+                or once it is found lost.
               items:
                 $ref: "#/components/schemas/DeliveryAttempt"
     NotificationList:
