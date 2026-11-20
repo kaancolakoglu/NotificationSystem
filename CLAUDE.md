@@ -206,7 +206,11 @@ These are settled. Raise it before changing one.
   `attempts` value read at claim. Reason: a sender that stalled past its
   lease must not overwrite the attempt that took the row after it. Its
   result is logged and dropped. The provider may then get the notification
-  twice, with the same `Idempotency-Key`.
+  twice, with the same `Idempotency-Key`. A CHECK requires `locked_until`
+  on every `processing` row. Reason: the sweeper matches
+  `locked_until < now()`, which a null never meets, so the row would stay
+  `processing` forever without an error. A worker from before the lease
+  that claims during a deploy now gets an error instead.
 - Release: a row given up without a provider call goes back to `pending`
   with its attempt refunded. This covers a breaker refusal, an unreachable
   limiter and a shutdown before the send starts. The write is conditional

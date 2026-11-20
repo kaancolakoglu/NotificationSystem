@@ -830,7 +830,7 @@ func TestGetBatch(t *testing.T) {
 
 	t.Run("counts follow each status", func(t *testing.T) {
 		for i, status := range statuses {
-			tag, err := pool.Exec(t.Context(), "UPDATE notifications SET status = $1 WHERE id = $2", status, *created.Results[i+1].Id)
+			tag, err := pool.Exec(t.Context(), "UPDATE notifications SET status = $1, locked_until = now() + interval '1 minute' WHERE id = $2", status, *created.Results[i+1].Id)
 			if err != nil {
 				t.Fatalf("set status: %v", err)
 			}
@@ -1164,7 +1164,7 @@ func insertNotification(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, channel,
 	t.Helper()
 	_, err := pool.Exec(
 		t.Context(),
-		"INSERT INTO notifications (id, recipient, channel, content, priority, status, batch_id) VALUES ($1, '+905551234567', $2, 'hello', 1, $3, $4)",
+		"INSERT INTO notifications (id, recipient, channel, content, priority, status, batch_id, locked_until) VALUES ($1, '+905551234567', $2, 'hello', 1, $3, $4, now() + interval '1 minute')",
 		id, channel, status, batchID,
 	)
 	if err != nil {
