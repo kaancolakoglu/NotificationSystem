@@ -83,6 +83,8 @@ PROVIDER_URL=https://webhook.site/<your-uuid> docker compose up --build --wait
 A free webhook.site URL stops answering after 50 to 100 requests. That is
 why it is not the default.
 
+Tested against webhook.site on 2026-11-20: one notification per channel, all three sent.
+
 The fake provider can fail on purpose. A notification whose content starts
 with `script:` gets the listed statuses, one per attempt, then 202. So
 `script:500,429` fails twice and is sent on the third attempt.
