@@ -16,7 +16,7 @@ const cancelNotification = `-- name: CancelNotification :one
 UPDATE notifications
 SET status = 'cancelled'
 WHERE id = $1 AND status = 'pending'
-RETURNING id, recipient, channel, content, priority, status, created_at, batch_id
+RETURNING id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id
 `
 
 func (q *Queries) CancelNotification(ctx context.Context, id uuid.UUID) (Notification, error) {
@@ -31,8 +31,67 @@ func (q *Queries) CancelNotification(ctx context.Context, id uuid.UUID) (Notific
 		&i.Status,
 		&i.CreatedAt,
 		&i.BatchID,
+		&i.NextAttemptAt,
+		&i.SentAt,
+		&i.ProviderMessageID,
 	)
 	return i, err
+}
+
+const claimNotifications = `-- name: ClaimNotifications :many
+WITH due AS (
+    SELECT candidate.id FROM notifications AS candidate
+    WHERE candidate.status = 'pending'
+      AND candidate.channel = $1
+      AND candidate.priority = $2
+      AND candidate.next_attempt_at <= now()
+    ORDER BY candidate.next_attempt_at
+    LIMIT $3
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE notifications
+SET status = 'processing'
+FROM due
+WHERE notifications.id = due.id
+RETURNING notifications.id, notifications.recipient, notifications.channel, notifications.content, notifications.priority, notifications.status, notifications.created_at, notifications.batch_id, notifications.next_attempt_at, notifications.sent_at, notifications.provider_message_id
+`
+
+type ClaimNotificationsParams struct {
+	Channel  string
+	Priority int16
+	RowLimit int32
+}
+
+func (q *Queries) ClaimNotifications(ctx context.Context, arg ClaimNotificationsParams) ([]Notification, error) {
+	rows, err := q.db.Query(ctx, claimNotifications, arg.Channel, arg.Priority, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Notification
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.Recipient,
+			&i.Channel,
+			&i.Content,
+			&i.Priority,
+			&i.Status,
+			&i.CreatedAt,
+			&i.BatchID,
+			&i.NextAttemptAt,
+			&i.SentAt,
+			&i.ProviderMessageID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const countBatchByStatus = `-- name: CountBatchByStatus :one
@@ -88,7 +147,7 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, key string) (GetIdempot
 }
 
 const getNotification = `-- name: GetNotification :one
-SELECT id, recipient, channel, content, priority, status, created_at, batch_id FROM notifications
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id FROM notifications
 WHERE id = $1
 `
 
@@ -104,6 +163,9 @@ func (q *Queries) GetNotification(ctx context.Context, id uuid.UUID) (Notificati
 		&i.Status,
 		&i.CreatedAt,
 		&i.BatchID,
+		&i.NextAttemptAt,
+		&i.SentAt,
+		&i.ProviderMessageID,
 	)
 	return i, err
 }
@@ -140,7 +202,7 @@ func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotenc
 const insertNotification = `-- name: InsertNotification :one
 INSERT INTO notifications (id, recipient, channel, content, priority)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, recipient, channel, content, priority, status, created_at, batch_id
+RETURNING id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id
 `
 
 type InsertNotificationParams struct {
@@ -169,12 +231,15 @@ func (q *Queries) InsertNotification(ctx context.Context, arg InsertNotification
 		&i.Status,
 		&i.CreatedAt,
 		&i.BatchID,
+		&i.NextAttemptAt,
+		&i.SentAt,
+		&i.ProviderMessageID,
 	)
 	return i, err
 }
 
 const listBatchNotifications = `-- name: ListBatchNotifications :many
-SELECT id, recipient, channel, content, priority, status, created_at, batch_id FROM notifications
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id FROM notifications
 WHERE batch_id = $1
   AND ($2::uuid IS NULL OR id >= $2)
   AND ($3::uuid IS NULL OR id < $3)
@@ -218,6 +283,9 @@ func (q *Queries) ListBatchNotifications(ctx context.Context, arg ListBatchNotif
 			&i.Status,
 			&i.CreatedAt,
 			&i.BatchID,
+			&i.NextAttemptAt,
+			&i.SentAt,
+			&i.ProviderMessageID,
 		); err != nil {
 			return nil, err
 		}
@@ -230,7 +298,7 @@ func (q *Queries) ListBatchNotifications(ctx context.Context, arg ListBatchNotif
 }
 
 const listNotifications = `-- name: ListNotifications :many
-SELECT id, recipient, channel, content, priority, status, created_at, batch_id FROM notifications
+SELECT id, recipient, channel, content, priority, status, created_at, batch_id, next_attempt_at, sent_at, provider_message_id FROM notifications
 WHERE id >= coalesce($1, '00000000-0000-0000-0000-000000000000'::uuid)
   AND id < coalesce($2, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)
   AND ($3::text IS NULL OR status = $3)
@@ -271,6 +339,9 @@ func (q *Queries) ListNotifications(ctx context.Context, arg ListNotificationsPa
 			&i.Status,
 			&i.CreatedAt,
 			&i.BatchID,
+			&i.NextAttemptAt,
+			&i.SentAt,
+			&i.ProviderMessageID,
 		); err != nil {
 			return nil, err
 		}
@@ -280,4 +351,39 @@ func (q *Queries) ListNotifications(ctx context.Context, arg ListNotificationsPa
 		return nil, err
 	}
 	return items, nil
+}
+
+const markFailed = `-- name: MarkFailed :execrows
+UPDATE notifications
+SET status = 'failed'
+WHERE id = $1 AND status = 'processing'
+`
+
+func (q *Queries) MarkFailed(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, markFailed, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markSent = `-- name: MarkSent :execrows
+UPDATE notifications
+SET status = 'sent',
+    sent_at = now(),
+    provider_message_id = $1
+WHERE id = $2 AND status = 'processing'
+`
+
+type MarkSentParams struct {
+	ProviderMessageID pgtype.Text
+	ID                uuid.UUID
+}
+
+func (q *Queries) MarkSent(ctx context.Context, arg MarkSentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markSent, arg.ProviderMessageID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

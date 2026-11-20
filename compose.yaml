@@ -50,3 +50,15 @@ services:
       interval: 2s
       timeout: 2s
       retries: 10
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
+      PROVIDER_URL: ${PROVIDER_URL:-http://fakeprovider:8081/}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      fakeprovider:
+        condition: service_healthy

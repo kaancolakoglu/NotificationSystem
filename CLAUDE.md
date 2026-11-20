@@ -170,6 +170,9 @@ These are settled. Raise it before changing one.
 - Worker: per channel, a pool of 20 goroutines fed by a Go channel. Poll
   every 200 ms. Claim at most the pool's free capacity. Query once per
   priority, high first.
+- The provider client keeps one idle connection per sender, 60 in total.
+  Reason: Go keeps 2 per host, and each poll starts up to 20 sends at once
+  per channel. Measured with 2: 1443 connections for 1500 sends.
 - Lease: a claim sets `locked_until = now() + 60s` and increments `attempts`.
   Result writes are conditional on `id`, `status = 'processing'` and the
   `attempts` value read at claim.
@@ -187,7 +190,9 @@ These are settled. Raise it before changing one.
   started, let in-flight sends finish (deadline 30 s), exit.
 - Compose uses `cmd/fakeprovider` by default. `PROVIDER_URL` switches to a
   webhook.site URL. Reason: free webhook.site URLs stop after 50 to 100
-  requests. The README says so.
+  requests. The README says so. The worker exits at start if `PROVIDER_URL`
+  is not an http or https URL. Reason: otherwise every notification would
+  fail one by one.
 
 ## Design reference
 
@@ -219,11 +224,7 @@ migrations/
 ### Claim query
 
 ```sql
-UPDATE notifications
-SET status = 'processing',
-    attempts = attempts + 1,
-    locked_until = now() + interval '60 seconds'
-WHERE id IN (
+WITH due AS (
   SELECT id FROM notifications
   WHERE status = 'pending'
     AND channel = $1
@@ -233,11 +234,23 @@ WHERE id IN (
   LIMIT $3
   FOR UPDATE SKIP LOCKED
 )
-RETURNING *;
+UPDATE notifications
+SET status = 'processing',
+    attempts = attempts + 1,
+    locked_until = now() + interval '60 seconds'
+FROM due
+WHERE notifications.id = due.id
+RETURNING notifications.*;
 ```
 
 Backed by a partial index on `(channel, priority, next_attempt_at) WHERE
 status = 'pending'`. The query must contain the literal `'pending'`.
+
+The rows to claim are picked in a CTE, not in `WHERE id IN (SELECT ...)`.
+Reason: a CTE runs once. As a subquery the planner may run the SELECT once
+per row, and each run skips the rows this statement already updated and
+picks the next ones. Measured with such a plan forced: a limit of 5 claimed
+all 2000 pending rows.
 
 ### Endpoints
 

@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,7 +30,7 @@ func newClient(t *testing.T, handler http.HandlerFunc) (*Client, *bytes.Buffer) 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	var logs bytes.Buffer
-	return New(server.URL, slog.New(slog.NewJSONHandler(&logs, nil))), &logs
+	return New(server.URL, 1, slog.New(slog.NewJSONHandler(&logs, nil))), &logs
 }
 
 func sendError(t *testing.T, client *Client) *Error {
@@ -234,10 +237,56 @@ func TestSendStopsWhenTheContextIsCancelled(t *testing.T) {
 	}
 }
 
+func TestSendReusesConnections(t *testing.T) {
+	const senders = 10
+	var opened atomic.Int32
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		arrived <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusAccepted)
+		if _, err := io.WriteString(w, `{"messageId":"message-1"}`); err != nil {
+			t.Errorf("write answer: %v", err)
+		}
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			opened.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+	client := New(server.URL, senders, slog.New(slog.DiscardHandler))
+
+	for range 2 {
+		var sends sync.WaitGroup
+		for range senders {
+			sends.Go(func() {
+				if _, err := client.Send(t.Context(), notificationID, message); err != nil {
+					t.Errorf("send: %v", err)
+				}
+			})
+		}
+		for range senders {
+			<-arrived
+		}
+		for range senders {
+			release <- struct{}{}
+		}
+		sends.Wait()
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if got := opened.Load(); got != senders {
+		t.Errorf("two rounds of %d simultaneous sends opened %d connections, want %d", senders, got, senders)
+	}
+}
+
 func TestSendTransportError(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	server.Close()
-	client := New(server.URL, slog.New(slog.DiscardHandler))
+	client := New(server.URL, 1, slog.New(slog.DiscardHandler))
 
 	err := sendError(t, client)
 

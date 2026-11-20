@@ -91,13 +91,14 @@ func TestCreateNotification(t *testing.T) {
 				t.Fatalf("get stored row: %v", err)
 			}
 			wantRow := store.Notification{
-				ID:        got.Id,
-				Recipient: tt.want.Recipient,
-				Channel:   string(tt.want.Channel),
-				Content:   tt.want.Content,
-				Priority:  tt.wantPriority,
-				Status:    "pending",
-				CreatedAt: row.CreatedAt,
+				ID:            got.Id,
+				Recipient:     tt.want.Recipient,
+				Channel:       string(tt.want.Channel),
+				Content:       tt.want.Content,
+				Priority:      tt.wantPriority,
+				Status:        "pending",
+				CreatedAt:     row.CreatedAt,
+				NextAttemptAt: row.CreatedAt,
 			}
 			if row != wantRow {
 				t.Errorf("stored row = %+v, want %+v", row, wantRow)
@@ -348,6 +349,7 @@ func TestCreateBatch(t *testing.T) {
 			want.ID = id
 			want.Status = "pending"
 			want.CreatedAt = row.CreatedAt
+			want.NextAttemptAt = row.CreatedAt
 			want.BatchID = pgtype.UUID{Bytes: got.BatchId, Valid: true}
 			if row != want {
 				t.Errorf("result %d: stored row = %+v, want %+v", index, row, want)

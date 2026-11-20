@@ -55,3 +55,32 @@ WHERE batch_id = sqlc.arg('batch_id')
   AND (sqlc.narg('channel')::text IS NULL OR channel = sqlc.narg('channel'))
 ORDER BY id DESC
 LIMIT sqlc.arg('row_limit');
+
+-- name: ClaimNotifications :many
+WITH due AS (
+    SELECT candidate.id FROM notifications AS candidate
+    WHERE candidate.status = 'pending'
+      AND candidate.channel = sqlc.arg('channel')
+      AND candidate.priority = sqlc.arg('priority')
+      AND candidate.next_attempt_at <= now()
+    ORDER BY candidate.next_attempt_at
+    LIMIT sqlc.arg('row_limit')
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE notifications
+SET status = 'processing'
+FROM due
+WHERE notifications.id = due.id
+RETURNING notifications.*;
+
+-- name: MarkSent :execrows
+UPDATE notifications
+SET status = 'sent',
+    sent_at = now(),
+    provider_message_id = sqlc.narg('provider_message_id')
+WHERE id = sqlc.arg('id') AND status = 'processing';
+
+-- name: MarkFailed :execrows
+UPDATE notifications
+SET status = 'failed'
+WHERE id = $1 AND status = 'processing';

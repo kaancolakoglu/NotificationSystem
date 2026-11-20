@@ -19,12 +19,15 @@ type IdempotencyKey struct {
 }
 
 type Notification struct {
-	ID        uuid.UUID
-	Recipient string
-	Channel   string
-	Content   string
-	Priority  int16
-	Status    string
-	CreatedAt time.Time
-	BatchID   pgtype.UUID
+	ID                uuid.UUID
+	Recipient         string
+	Channel           string
+	Content           string
+	Priority          int16
+	Status            string
+	CreatedAt         time.Time
+	BatchID           pgtype.UUID
+	NextAttemptAt     time.Time
+	SentAt            pgtype.Timestamptz
+	ProviderMessageID pgtype.Text
 }

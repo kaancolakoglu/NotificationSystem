@@ -42,11 +42,14 @@ type Client struct {
 	logger *slog.Logger
 }
 
-func New(url string, logger *slog.Logger) *Client {
+func New(url string, connections int, logger *slog.Logger) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = connections
 	return &Client{
 		url: url,
 		http: &http.Client{
-			Timeout: timeout,
+			Transport: transport,
+			Timeout:   timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
