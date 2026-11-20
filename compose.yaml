@@ -17,6 +17,15 @@ services:
       timeout: 2s
       retries: 10
 
+  fakeprovider:
+    build: .
+    command: ["fakeprovider"]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8081/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
   migrate:
     build: .
     command: ["migrate"]

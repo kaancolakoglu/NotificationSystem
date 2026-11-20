@@ -147,10 +147,16 @@ These are settled. Raise it before changing one.
 - Cancel works only from `pending`: 200 on success, 409 otherwise, 404 if
   unknown.
 - Provider call: JSON `{"to","channel","content"}`, header
-  `Idempotency-Key: <notification id>`, timeout 5 s. Success is 202.
+  `Idempotency-Key: <notification id>`, timeout 5 s. Success is 202. A 202
+  whose body has no readable `messageId` is still a success, and is logged.
+  Reason: the provider has accepted it, so failing it would report it wrong
+  and retrying would send it twice.
 - Error classes: retry on transport errors, timeouts, 408, 429 and 5xx. Any
-  other 4xx goes to `failed` at once. For 429, wait the larger of
-  `Retry-After` and the backoff.
+  other answer that is not 202 goes to `failed` at once: another 4xx, a 2xx
+  such as 200, and a redirect, which is not followed. Reason: Go follows a
+  301, 302 or 303 with a GET that has no body, and a 202 to that GET would
+  count as sent. For 429, wait the larger of `Retry-After` and the backoff.
+  `Retry-After` is read as seconds or as an HTTP date, and only on a 429.
 - Backoff is full jitter: `random(0, 1s * 2^attempts)`, where `attempts` is
   the row's value after the failed send, so 1 after the first try. Maximum
   5 attempts, so the ceilings are 2, 4, 8 and 16 s.
